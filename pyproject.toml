@@ -19,7 +19,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "vvaharness"
 version = "1.0.0"
-description = "Agentic SAST pipeline — LLM-driven multi-stage vulnerability analysis with SARIF output"
+description = "Visa's open-source harness for autonomous vulnerability discovery and validation, using frontier AI models"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"

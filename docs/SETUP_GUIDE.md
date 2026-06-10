@@ -221,12 +221,15 @@ Notes:
 `vvaharness` ships three profiles under `vvaharness/config/profiles/`:
 
 - **`default.yaml`** — every role through the `claude` CLI (`via: cli`) on
-  `claude-sonnet-4-6`, with the sandboxed Read/Glob/Grep tools (no Bash). It
-  reuses your Claude Code login, so no `ANTHROPIC_SDK_API_KEY` is needed. Used
-  automatically when no `./config.yaml` is present.
-- **`cli.yaml`** — the same all-`cli` layout, but with **Bash** added to the
-  agentic stages' `allowed_tools` (`step1`, `step6_verify`) for shell-powered
-  recon and evidence retrieval.
+  `claude-sonnet-4-6`. It reuses your Claude Code login, so no
+  `ANTHROPIC_SDK_API_KEY` is needed. Used automatically when no
+  `./config.yaml` is present. The `cli` backend gives the model native
+  Read/Glob/Grep/Bash tools inside the target directory — for untrusted
+  targets prefer a `via: sdk` / `via: openai` profile (sandboxed
+  Read/Glob/Grep, no shell); see [`security.md`](security.md).
+- **`cli.yaml`** — the same all-`cli` layout, with **Bash** explicitly listed
+  in the agentic stages' `allowed_tools` (`step1`, `step6_verify`) for
+  shell-powered recon and evidence retrieval.
 - **`full.yaml`** — an example multi-backend layout (Claude CLI + OpenAI + SDK
   roles) you can copy and edit:
 

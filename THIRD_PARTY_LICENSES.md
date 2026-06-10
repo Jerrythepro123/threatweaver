@@ -10,9 +10,9 @@ transparency and compliance review.
 
 | License | Packages |
 |---|---|
-| MIT | anthropic, anyio, annotated-types, charset-normalizer, docstring-parser, exceptiongroup, h11, jiter, pydantic, pydantic-core, pyyaml, sniffio, urllib3 |
-| Apache-2.0 | distro, requests, sniffio *(dual MIT / Apache-2.0)* |
-| BSD-3-Clause | httpcore, httpx, idna |
+| MIT | anthropic, anyio, annotated-types, charset-normalizer, docstring-parser, exceptiongroup, h11, jiter, pydantic, pydantic-core, pyyaml, urllib3 |
+| Apache-2.0 | distro, openai, requests, sniffio *(dual MIT / Apache-2.0)* |
+| BSD-3-Clause | httpcore, httpx, idna, python-dotenv |
 | MPL-2.0 | certifi |
 | PSF (Python Software Foundation) | typing-extensions |
 

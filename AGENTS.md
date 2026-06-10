@@ -57,9 +57,9 @@ what it says, then re-run `setup` until it prints **Ready ✓**.
 ## Choosing a profile (don't guess — `setup` recommends one)
 | You have… | Use | How |
 |---|---|---|
-| `ANTHROPIC_SDK_API_KEY` (sk-ant-…) | `default` (SDK) | default — no flag |
-| Claude Code auth (gateway token / `claude login`) | `cli` | `--config vvaharness/config/profiles/cli.yaml` |
-| `OPENAI_API_KEY` + others | `full` | `--config vvaharness/config/profiles/full.yaml` |
+| Claude Code auth (`claude login` / gateway token) | `default` | default — no flag |
+| `ANTHROPIC_SDK_API_KEY` (sk-ant-…) and/or `OPENAI_API_KEY` | `full` | `--config vvaharness/config/profiles/full.yaml` |
+| Claude Code auth, want Bash listed in `allowed_tools` | `cli` | `--config vvaharness/config/profiles/cli.yaml` |
 
 ### Internal gateway note (common cause of 401)
 If `ANTHROPIC_API_KEY` is a JWT (`eyJ…`) you are using a gateway/Claude-Code
@@ -103,3 +103,6 @@ vvaharness scan --repo /path/to/target --application-id <id> [--config <profile>
 | pick a shipped `--config` profile | hand-write a config-*.yaml |
 | set env vars / `.env` for creds & gateway | paste keys into config or source |
 | report bugs with `VVAHARNESS_DEBUG=1` | "fix" the tool to force a run |
+| invoke from outside the target with explicit `--config` | `cd` into the scanned repo then run |
+| use `via: sdk` or `via: openai` for untrusted targets | use `via: cli` against repos you didn't author |
+| re-run a failed scan clean | pass `--resume` against an untrusted repo |

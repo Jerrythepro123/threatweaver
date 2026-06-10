@@ -50,7 +50,7 @@ SARIF parser reads each by regex):
 **File:** `path:start-end`
 **CVSS 3.1:** score (rating) — `vector`
 **VulContextSeverity:** `env-vector` - score (rating)   (if CMDB enrichment ran)
-**OffensivePriority:** Pn - label | reason         (if CMDB enrichment ran)
+**OffensivePriority:** Pn - label | reason
 **Confidence:** 0.NN (V of N runs agreed)
 
 #### Description

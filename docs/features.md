@@ -79,7 +79,7 @@ backward compatibility.
 | Rule | Why |
 |---|---|
 | **Bash** is available only in agentic stages (`preprocess`, `verify`) when that role is `via: cli`. | Only the CLI backend exposes Bash; re-add `- Bash` to `allowed_tools` when you switch. |
-| **s4 majority-vote** (`step4.runs > 1`) engages only when `deepdive` is `via: sdk` *and* the model accepts `temperature`. | Voting is auto-forced to single-pass otherwise (e.g. Opus 4.7+ reject `temperature`); the s5 prefilter becomes the main FP defence. |
+| **s4 majority-vote** (`step4.runs > 1`) engages only when `deepdive` is `via: sdk` or `via: openai` *and* the model accepts `temperature`. | Voting is auto-forced to single-pass on `via: cli` and on temp-rejecting models (e.g. Opus 4.7+); the s5 prefilter becomes the main FP defence. |
 | **mTLS** (`client_cert`) works only on `via: sdk` roles. | `cli` (Node has no env path) and `openai` don't support client certs — route at least one role via `sdk` for an mTLS-gated gateway. |
 | **`cli` ignores** `temperature`; **honours** `max_budget_usd` / `effort`, and `max_turns` when the installed CLI supports it. | The CLI manages its own tool loop; `--max-turns` is forwarded only when the binary advertises it (probe-gated), else `--max-budget-usd` / the timeout bound the loop. |
 | **`cli` agentic stages** drive the CLI with `--output-format stream-json --verbose`. | Claude CLI ≥2.1.119 rejects `--print` + `stream-json` without `--verbose`; the pairing is mandatory and emitted unconditionally. Requires a `claude` build that accepts `--verbose` with stream-json (every supported 2.x does). |
@@ -213,7 +213,7 @@ These work regardless of backend choice:
 
 - **Taint analysis** — entry→sink data-flow chunks walked across the call graph, ranked above plain risk chunks.
 - **Specialist passes** — repo-wide crypto, logic-bug, access-control, batch-etl & IaC sweeps (IaC auto-gated to repos with Terraform/Docker/k8s).
-- **Majority-vote FP filter** — run a chunk N× at T>0; a finding must appear in ≥ threshold runs to survive (`sdk` + `temperature`).
+- **Majority-vote FP filter** — run a chunk N× at T>0; a finding must appear in ≥ threshold runs to survive (`sdk`/`openai` + `temperature`).
 - **Adversarial verification** — one verifier per finding renders TRUE / FALSE_POSITIVE with its own evidence and a CVSS 3.1 score.
 - **CVSS + CMDB scoring** — CVSS 3.1 base on every finding, plus optional VulContextSeverity + OffensivePriority from a CMDB export.
 - **SARIF 2.1.0 output** — machine-ingestible SARIF (`tool.driver.name = "Agentic SAST"`) alongside the Markdown report, with a `tool.driver.rules[]` catalog, a CWE taxonomy referenced via `supportedTaxonomies`, and an `invocations[]` entry that marks a degraded run (`executionSuccessful=false`).

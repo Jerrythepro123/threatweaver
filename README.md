@@ -21,12 +21,19 @@ limitations under the License.
 ![Version](https://img.shields.io/badge/version-1.0.0-informational.svg)
 ![Output](https://img.shields.io/badge/output-Markdown%20%2B%20SARIF%202.1.0-green.svg)
 
-VVAH is Visa's open-source harness for autonomous vulnerability discovery and
-validation, using frontier AI models. Threat modeling before analysis improves
-finding quality,
-multi-agent deterministic voting reduces noise, and the bottleneck is triage
-speed — not discovery. VVAH compresses that lifecycle from AI-discovered weakness to
-validated, actionable finding, measured as Mean Time to Adapt (MTTA).
+VVAH is Visa's open-source harness for autonomous vulnerability discovery
+using frontier AI models, built on learnings from
+[Project Glasswing](https://www.anthropic.com/glasswing) (Anthropic's
+initiative for AI-assisted vulnerability research).
+
+Three design choices drive finding quality: threat modeling before analysis
+focuses the attack surface; multi-agent deterministic voting reduces false
+positives; and structured triage artifacts compress the lifecycle from
+AI-discovered weakness to actionable finding. The bottleneck in AI-assisted
+vulnerability management is triage speed, not discovery — VVAH is designed
+around that constraint. The primary effectiveness metric is **Mean Time to
+Adapt (MTTA)**: time from AI-discovered weakness to a validated fix in
+production.
 
 Multi-model by design, VVAH works with Anthropic Claude, OpenAI, or any
 combination. No single provider is a dependency.
@@ -38,12 +45,46 @@ accepting external contributions; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 > permission to test. Findings are LLM-generated triage candidates that require
 > human review — see [Limitations](#limitations-read-before-you-trust-output).
 
-```
-s1 preprocess → s2 threatmodel → s3 decompose → s4 deepdive
-              → s5 prefilter   → s6 verify     → s7 dedup → s8 chain → SARIF
-```
+**Docs:** [SETUP_GUIDE.md](docs/SETUP_GUIDE.md) — install & configuration · [USER_GUIDE.md](docs/USER_GUIDE.md) — commands & options.
 
-**Docs:** [SETUP_GUIDE.md](SETUP_GUIDE.md) — install & configuration · [USER_GUIDE.md](USER_GUIDE.md) — commands & options.
+---
+
+## Pipeline
+
+Three phases, nine stages. Each stage combines deterministic controls with
+frontier-model reasoning to produce structured, exploit-validated findings.
+
+| Phase | Stages | Purpose |
+|---|---|---|
+| Discovery & Modeling | S1–S3 | Attack surface mapping, threat modeling, hunting plan |
+| Deep Dive & Verification | S4–S6 | Multi-lens research, policy gates, adversarial verification |
+| Synthesis, Chaining & Reporting | S7–S9 | Deduplication, chain construction, SARIF emission |
+
+Standardized inputs (batch repositories, GitHub Enterprise metadata, CMDB
+records, CVE and control feeds) flow in. Structured reports, SARIF artifacts,
+and API-ready findings flow out.
+
+See [`docs/architecture.md`](docs/architecture.md) for stage-by-stage detail.
+
+---
+
+## Skills
+
+Each pipeline stage is implemented as a composable, reusable skill. Skills can
+be independently tuned, versioned, and replaced without rewiring the pipeline.
+
+| Stage | Skill |
+|---|---|
+| S1 — Explore the attack surface | Attack surface mapper (code, CMDB, CVE, controls) |
+| S2 — Model threats in business context | AppSec threat modeler (STRIDE, OWASP, trust boundaries) |
+| S3 — Strategize and prioritize | Vulnerability research strategist (taint, API boundaries, authorization controls) |
+| S4 — Research by specialized lens | Language, Crypto, Logic-bug, Access-control, Batch/ETL, IaC |
+| S6 — Adversarial verification | Adversarial reviewer (exploit chain, trust boundary tracing) |
+| S8 — Chain construction and reporting | Exploit strategist (CWE, attack paths, remediation) |
+
+See [`docs/SKILLS.md`](docs/SKILLS.md) for configuration and extension guidance.
+
+---
 
 ## Requirements
 
@@ -127,14 +168,14 @@ secrets in `.env`, and copy-then-edit customisation — see
 | You are… | What you need | Profile |
 |---|---|---|
 | **Public / subscription user** (most people) | Claude Code (`claude login`) for the default; **or** an Anthropic API key `ANTHROPIC_SDK_API_KEY=sk-ant-…` if you prefer `via: sdk` roles | `default` / `cli` (login) or `full` (key) — nothing else: no gateway, no CA cert, no extra flags |
-| **Enterprise behind a private AI gateway** | also set `ANTHROPIC_BASE_URL`, plus `NODE_EXTRA_CA_CERTS` (private CA) and `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` if the gateway needs them | `default` / `cli` or `full` — see [SETUP_GUIDE.md](SETUP_GUIDE.md) |
+| **Enterprise behind a private AI gateway** | also set `ANTHROPIC_BASE_URL`, plus `NODE_EXTRA_CA_CERTS` (private CA) and `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` if the gateway needs them | `default` / `cli` or `full` — see [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md) |
 
 Run **`vvaharness setup`** either way — it tells you exactly what (if anything)
 is missing for *your* situation. A gateway token is only flagged when you
 actually have one.
 
-See **[USER_GUIDE.md](USER_GUIDE.md)** for all commands and options and
-**[SETUP_GUIDE.md](SETUP_GUIDE.md)** for detailed install/configuration.
+See **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** for all commands and options and
+**[docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md)** for detailed install/configuration.
 
 ## Run
 
@@ -184,15 +225,23 @@ Per target, under `<target>/security-scan/`:
   models that reject `temperature` (e.g. Opus 4.7+).
 - **Token-hungry.** Caps are per-stage / per-finding, not global. Use
   `vvaharness estimate` and the `step*.max_budget_usd` knobs.
-- **No published accuracy numbers yet.** Precision/recall figures are not yet published.
-- **Elevated Privilege** This tool runs with elevated privilege and must only be used against trusted repositories by authorized operators; running it against untrusted input without the recommended hardening controls may expose host credentials, API keys, and sensitive files to exfiltration or pipeline bypass.
+- **No published accuracy numbers yet.** Precision/recall figures are not yet
+  published.
+- **Elevated Privilege** This tool runs with elevated privilege and must only be
+  used against trusted repositories by authorized operators; running it against
+  untrusted input without the recommended hardening controls may expose host
+  credentials, API keys, and sensitive files to exfiltration or pipeline bypass.
 
 See `docs/` for configuration, models, pipeline, and output details.
 
+---
+
 ## Security
 
-Report vulnerabilities responsibly — see [SECURITY.md](SECURITY.md). Please do not
-open security issues in a public tracker.
+Report vulnerabilities responsibly — see [SECURITY.md](SECURITY.md). Please do
+not open security issues in a public tracker.
+
+---
 
 ## License
 
@@ -202,3 +251,5 @@ Licensed under the **Apache License, Version 2.0** — see [LICENSE](LICENSE) an
 Third-party dependencies are installed from PyPI at install time (not bundled
 in this repository); their licenses are inventoried in
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
