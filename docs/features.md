@@ -229,4 +229,4 @@ These work regardless of backend choice:
 - **Voting needs `sdk` + `temperature`.** Models that reject `temperature` (e.g. Opus 4.7+) and the `cli` backend always run single-pass; the deterministic s5 prefilter is then the main FP defence.
 - **Severity is CVSS-derived.** Findings are labelled Critical / High / Medium / Low / Info, with the scored tiers taken straight from the CVSS 3.1 base-score band (Critical 9.0–10.0, High 7.0–8.9, Medium 4.0–6.9, Low 0.1–3.9) so the label never disagrees with the vector; Info covers findings with no demonstrated exploit path. The base score (0–10) is reported verbatim.
 - **Token-hungry.** Caps are per-stage / per-finding, not global. Use `vvaharness estimate` and the `step*.max_budget_usd` knobs.
-- **No published accuracy numbers yet.** Precision/recall measurement is a TODO.
+- **No published accuracy numbers yet.** Precision/recall figures are not yet published.
