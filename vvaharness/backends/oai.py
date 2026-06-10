@@ -57,8 +57,12 @@ except ImportError:
 
 
 _REDACT_RX = re.compile(r"(sk-[A-Za-z0-9_-]{6})[A-Za-z0-9_-]+")
-_ZS_REASON_RX = re.compile(
-    r'(?:class="eu_co rsn">\s*|reason=)([^<&\n]{1,200})', re.I)
+# Match a human-readable block reason in a corporate-proxy / DLP intercept
+# page (vendor-neutral): a `reason=` query/form param, or text inside a
+# <span>/<div> whose class name contains "rsn"/"reason".
+_PROXY_REASON_RX = re.compile(
+    r'(?:class="[^"]*\brsn\b[^"]*">\s*|class="[^"]*\breason\b[^"]*">\s*|reason=)'
+    r'([^<&\n]{1,200})', re.I)
 
 
 def _summarise_status_error(e) -> str:
@@ -78,8 +82,8 @@ def _summarise_status_error(e) -> str:
             body = ""
     body = body or str(getattr(e, "message", "") or e)
     low = body.lower()
-    if "zscaler" in low or "dlp" in low or "<html" in low:
-        m = _ZS_REASON_RX.search(body)
+    if "dlp" in low or "<html" in low:
+        m = _PROXY_REASON_RX.search(body)
         reason = _scrub_secrets((m.group(1).strip() if m else "policy block"))
         return (f"blocked by corporate proxy/DLP — {reason}. "
                 f"Request an exception or point openai.base_url at an "

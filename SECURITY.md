@@ -21,33 +21,29 @@ Visa Vulnerability Agentic Harness (`vvaharness`) project.
 
 - [Reporting a Vulnerability](#reporting-a-vulnerability)
 - [Disclosure Policy](#disclosure-policy)
-- [Supported Versions](#supported-versions)
-- [Comments on this Policy](#comments-on-this-policy)
+- [Security considerations](#security-considerations)
+
+---
 
 ## Reporting a Vulnerability
 
-Visa and the `vvaharness` maintainers take all security vulnerabilities
-seriously. Thank you for improving the security of our software. We appreciate
-your efforts and responsible disclosure and will make every effort to
-acknowledge your contributions.
+Thank you for improving the security of our software. We appreciate your
+efforts and responsible disclosure and will make every effort to acknowledge
+your report.
 
 Please report security vulnerabilities by emailing the security team at:
 
-<!-- TODO(VISA): replace with the official Visa security reporting address -->
-- **`<security-reporting@visa.com>`**
+- **`vvaharness@visa.com`**
 
 For coordinated disclosure and additional reporting channels, see:
 
-<!-- TODO(VISA): replace with the official Visa vulnerability-disclosure / PSIRT URL -->
-- Visa Vulnerability Disclosure Program: `<https://www.visa.com/security-disclosure>`
+- Visa Vulnerability Disclosure Program: https://usa.visa.com/about-visa/vulnerability-disclosure.html
 
 Please do **not** report security vulnerabilities through public GitHub issues.
 
-The security team will acknowledge your email within **48 hours**, and will
-send a more detailed response within **48 hours** indicating the next steps in
-handling your report. After the initial reply, the security team will keep you
-informed of the progress toward a fix and full announcement, and may ask for
-additional information or guidance.
+The security team will acknowledge your email and follow up with next steps
+in handling your report. We will keep you informed of progress toward a fix
+and full announcement, and may ask for additional information or guidance.
 
 When reporting, please include as much of the following as you can to help us
 triage quickly:
@@ -61,6 +57,8 @@ triage quickly:
 
 Report security vulnerabilities in **third-party dependencies** to the party
 that maintains the affected component.
+
+---
 
 ## Disclosure Policy
 
@@ -76,24 +74,52 @@ the following steps:
 Public disclosure is coordinated with the reporter; please give us reasonable
 time to remediate before any public discussion of the issue.
 
-## Supported Versions
+---
 
-Security fixes are provided for the versions listed below.
+## Security considerations
 
-<!-- TODO(VISA): adjust the supported-version matrix to match the release policy -->
+**TL;DR:** `vvaharness` reads repository content and forwards redacted
+excerpts to the configured LLM API. Keep scan credentials and config outside
+the repositories you scan, restrict tool access in CI/CD, and scope batch jobs
+to repositories your team is authorized to scan.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 1.0.x   | :white_check_mark: |
-| < 1.0   | :x:                |
+### How the tool handles your data
 
-## Operational security of the tool itself
+File reads through the sandboxed tool loop and the s1 inventory are confined
+to the repository root — symlinks and path traversals that point outside it
+are rejected. File content reaches the LLM
+only after being passed through the redaction layer, which masks credentials,
+private keys, and payment card data before anything leaves the host. API keys
+and git tokens are kept in environment variables and sent as HTTP headers; they
+do not appear in prompts.
 
-For how `vvaharness` protects scan inputs and outputs at runtime — secret/PII
-redaction, sandboxed tool access, credential handling, and TLS — see
-[`docs/security.md`](docs/security.md).
+Batch mode clones each repository into an isolated workspace directory, scans
+it, then removes the clone when the scan completes.
 
-## Comments on this Policy
+For a full description of redaction patterns, backend TLS settings, and
+credential handling, see [`docs/security.md`](docs/security.md).
 
-If you have suggestions on how this process could be improved, please submit a
-pull request or open a discussion.
+### Deployment recommendations
+
+- **Keep scan infrastructure separate from scan targets.** Store checkpoints,
+  config, and credentials in directories outside the repositories you scan.
+- **Restrict tool access in CI/CD.** Review and restrict tool access before
+  deploying in production.
+- **Keep batch manifests under security-team control** and restrict the git
+  host to your internal domain.
+
+### Input handling
+
+As with any analysis tool, `vvaharness` processes repository content as part
+of its normal operation. The pipeline is designed to treat that content as
+data, and all output is produced as report files for human review. Apply the
+same judgement to SARIF output that you would to any automated tool result.
+
+### What not to scan
+
+- Repositories your team is not authorized to scan.
+- Large monorepos without first scoping the scan using `vvaharness estimate`,
+  `--stop-after`, or `--auto-step1`.
+- Directories containing only binaries, generated code, or vendored
+  dependencies — exclude these via `exclude_dirs` in your config to keep
+  results focused.

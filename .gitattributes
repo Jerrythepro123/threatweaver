@@ -43,4 +43,7 @@
 # if a file slips past .gitignore into the tree.
 .env             export-ignore
 .env.*           export-ignore
+# …but the tracked template MUST ship in release tarballs (documented setup
+# step: `cp .env.example .env`). Last matching line wins, so un-set it.
+.env.example     -export-ignore
 

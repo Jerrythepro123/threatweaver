@@ -21,9 +21,18 @@ limitations under the License.
 ![Version](https://img.shields.io/badge/version-1.0.0-informational.svg)
 ![Output](https://img.shields.io/badge/output-Markdown%20%2B%20SARIF%202.1.0-green.svg)
 
-LLM-driven SAST engine: a 9-stage analysis chain that surveys a repo, threat-models
-it, decomposes into chunks, deep-dives, adversarially verifies, deduplicates, and
-emits enriched Markdown + SARIF 2.1.0 reports.
+VVAH is Visa's open-source harness for autonomous vulnerability discovery and
+validation, using frontier AI models. Threat modeling before analysis improves
+finding quality,
+multi-agent deterministic voting reduces noise, and the bottleneck is triage
+speed — not discovery. VVAH compresses that lifecycle from AI-discovered weakness to
+validated, actionable finding, measured as Mean Time to Adapt (MTTA).
+
+Multi-model by design, VVAH works with Anthropic Claude, OpenAI, or any
+combination. No single provider is a dependency.
+
+For setup, see [`docs/SETUP_GUIDE.md`](docs/SETUP_GUIDE.md). This repo is not
+accepting external contributions; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 > **Authorized use only.** Run scans only against code you own or have explicit
 > permission to test. Findings are LLM-generated triage candidates that require
@@ -175,7 +184,8 @@ Per target, under `<target>/security-scan/`:
   models that reject `temperature` (e.g. Opus 4.7+).
 - **Token-hungry.** Caps are per-stage / per-finding, not global. Use
   `vvaharness estimate` and the `step*.max_budget_usd` knobs.
-- **No published accuracy numbers yet.** Precision/recall measurement is a TODO.
+- **No published accuracy numbers yet.** Precision/recall figures are not yet published.
+- **Elevated Privilege** This tool runs with elevated privilege and must only be used against trusted repositories by authorized operators; running it against untrusted input without the recommended hardening controls may expose host credentials, API keys, and sensitive files to exfiltration or pipeline bypass.
 
 See `docs/` for configuration, models, pipeline, and output details.
 

@@ -102,8 +102,8 @@ class _FakeStatusErr(Exception):
 
 
 def test_summarise_collapses_dlp_html_block():
-    body = ('<html><body><div class="eu_co rsn">Not allowed to access this '
-            'file type</div></body></html> zscaler proxy')
+    body = ('<html><body><div class="block rsn">Not allowed to access this '
+            'file type</div></body></html> dlp proxy')
     err = _FakeStatusErr(response=_FakeResp(body))
     out = oai._summarise_status_error(err)
     assert "blocked by corporate proxy/DLP" in out
@@ -114,7 +114,7 @@ def test_summarise_collapses_dlp_html_block():
 
 
 def test_summarise_dlp_with_no_reason_uses_policy_block():
-    body = "<html><body>zscaler dlp generic page with no parseable reason</body></html>"
+    body = "<html><body>dlp generic page with no parseable block detail</body></html>"
     err = _FakeStatusErr(response=_FakeResp(body))
     out = oai._summarise_status_error(err)
     assert "blocked by corporate proxy/DLP" in out
@@ -122,7 +122,7 @@ def test_summarise_dlp_with_no_reason_uses_policy_block():
 
 
 def test_summarise_dlp_scrubs_secret_in_reason():
-    body = ('<html>dlp <div class="eu_co rsn">reflected sk-ABCDEFsecrettail123456'
+    body = ('<html>dlp <div class="block rsn">reflected sk-ABCDEFsecrettail123456'
             '</div></html>')
     err = _FakeStatusErr(response=_FakeResp(body))
     out = oai._summarise_status_error(err)

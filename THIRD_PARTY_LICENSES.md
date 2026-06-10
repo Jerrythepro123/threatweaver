@@ -6,7 +6,7 @@ at install time (`pipx install .` / `pip install .`) and are **not** vendored
 or redistributed as part of this repository. This inventory is provided for
 transparency and compliance review.
 
-**Source:** Sonatype Nexus IQ scan — June 4, 2026
+**Source:** automated software-composition-analysis scan — June 4, 2026
 
 | License | Packages |
 |---|---|

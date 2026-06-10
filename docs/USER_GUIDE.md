@@ -249,7 +249,7 @@ instead, alongside the existing JSON artifacts (`run_manifest.json`,
   verbatim on each finding.
 - **Token-hungry.** Cost caps are per-stage / per-finding, not global. Use
   `vvaharness estimate` and the `step*.max_budget_usd` knobs.
-- **No published accuracy numbers yet.** Precision/recall measurement is a TODO.
+- **No published accuracy numbers yet.** Precision/recall figures are not yet published.
 
 ---
 

@@ -21,10 +21,14 @@
 # ── Secrets & credentials ─────────────────────────────────────────────────
 .env
 .env.*
-*.txt
-.claude
 !.env.example
-!.env.bat.example
+# Scoped secret/credential text dumps only — NOT a blanket *.txt (which would
+# swallow LICENSEs, fixtures, and any tracked text file tree-wide).
+*secret*.txt
+*secrets*.txt
+*token*.txt
+*credentials*.txt
+.claude
 *.pem
 *.key
 *.p12
@@ -33,13 +37,32 @@
 *.der
 *.crt
 *.xlsx
+# Local config override (machine-specific keys / endpoints; never published)
+config.local.yaml
 
-# CMDB export (real app data; each user supplies their own)
-!inputs/cmdb.example.csv
-# live CVE feeds — keep only the *.example.json templates
+# CMDB export (real app data: externally-facing/PCI/PAN/PII flags, internal
+# app ids; each user supplies their own). Ignore the real file, keep only the
+# *.example.csv template.
+inputs/cmdb*.csv
+!inputs/cmdb*.example.csv
+# Batch repo list (real internal clone URLs / hosts / app ids).
+inputs/repos*.csv
+!inputs/repos*.example.csv
+# Design-controls (describes internal security architecture in `notes`).
+inputs/design_controls*.yaml
+!inputs/design_controls*.example.yaml
+# Live CVE feeds — keep only the *.example.json templates.
+inputs/known_cves*.json
 !inputs/known_cves*.example.json
 
-
+# ── Scan outputs & generated reports ──────────────────────────────────────
+scans*/
+security-scan/
+batch-workspace/
+out/
+*.sarif
+*_report.md
+*_report.md.bak
 
 # ── Runtime state & caches ────────────────────────────────────────────────
 __pycache__/
@@ -54,6 +77,7 @@ htmlcov/
 build/
 dist/
 .venv/
+.venv.*
 venv/
 *.log
 *.jsonl
@@ -69,3 +93,6 @@ Thumbs.db
 node_modules/
 
 
+
+# user-local config override (copied from a profile) — never commit
+config.yaml
