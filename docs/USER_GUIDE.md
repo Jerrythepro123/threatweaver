@@ -72,7 +72,7 @@ config profiles.
 
 ## 1. Commands
 
-`vvaharness` exposes three subcommands (`scan` is the default if omitted):
+`vvaharness` exposes four subcommands (a bare invocation prints help):
 
 | Command | Purpose |
 |---|---|

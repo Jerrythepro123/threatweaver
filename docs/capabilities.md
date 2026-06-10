@@ -59,7 +59,7 @@ s1 preprocess → s2 threatmodel → s3 decompose → s4 deepdive
 | `openai` | OpenAI-compatible | Read · Glob · Grep | `temperature` | `OPENAI_API_KEY` |
 
 **Best generic-Claude blend (2M LOC):** Opus 4.8 for reasoning/low-volume (threatmodel, decompose, verify, chain) · Sonnet 4.6 for high-volume + voting (preprocess, deepdive, dedup) · Haiku 4.5 for the survey.
-**Voting note:** s4 majority vote needs `sdk` + `temperature > 0`; Opus 4.7+ reject `temperature` → single-pass.
+**Voting note:** s4 majority vote needs `via: sdk` or `via: openai` + `temperature > 0`; `via: cli` and temp-rejecting models (Opus 4.7+) → single-pass.
 
 ---
 
@@ -115,6 +115,6 @@ s1 preprocess → s2 threatmodel → s3 decompose → s4 deepdive
 
 ---
 
-> **Limitations:** findings are LLM-generated **triage candidates** — human review required. Runs are non-deterministic. Severity tops at **High**; the CVSS base score (0–10) is reported verbatim.
+> **Limitations:** findings are LLM-generated **triage candidates** — human review required. Runs are non-deterministic. Severity is labelled None / Low / Medium / High / Critical per the CVSS 3.1 bands; the base score (0–10) is reported verbatim.
 
 *© 2026 Visa, Inc. · Apache-2.0*

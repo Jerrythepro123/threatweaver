@@ -16,3 +16,19 @@ limitations under the License.
 
 # Changelog
 
+## [1.0.0] — 2026-06-09
+
+Initial open-source release.
+
+### What's included
+- 9-stage agentic SAST pipeline: repository survey → threat model →
+  decompose → deep-dive → pre-filter → adversarial verify → dedup →
+  chain → SARIF 2.1.0
+- Multi-model: works with the Claude CLI, Anthropic SDK, or any
+  OpenAI-compatible endpoint; mix backends per role
+- Precision controls: call-graph validation, taint-flow analysis,
+  multi-agent voting, CVSS 3.1 scoring
+- Batch mode: clone and scan multiple repositories from a CSV manifest
+- Three shipped configuration profiles: CLI-first default, Bash-enabled
+  CLI, and multi-backend
+
