@@ -101,10 +101,14 @@ credential handling, see [`docs/security.md`](docs/security.md).
 
 ### Deployment recommendations
 
-- **Keep scan infrastructure separate from scan targets.** Store checkpoints,
-  config, and credentials in directories outside the repositories you scan.
-- **Restrict tool access in CI/CD.** Review and restrict tool access before
-  deploying in production.
+- **Only scan repositories you trust.** The scanned repository is an input to
+  the pipeline; treat it with the same caution as any other untrusted input
+  to a privileged process.
+- **Keep scan infrastructure separate from scan targets.** Store config and
+  credentials in directories outside the repositories you scan. Run scans from
+  a working directory that is **not** inside the target repository.
+- **Restrict tool access in CI/CD.** Review and restrict tool access, and
+  ensure sandboxing to reduce risk.
 - **Keep batch manifests under security-team control** and restrict the git
   host to your internal domain.
 
@@ -118,6 +122,7 @@ same judgement to SARIF output that you would to any automated tool result.
 ### What not to scan
 
 - Repositories your team is not authorized to scan.
+- **Repositories whose committers you do not fully trust.**
 - Large monorepos without first scoping the scan using `vvaharness estimate`,
   `--stop-after`, or `--auto-step1`.
 - Directories containing only binaries, generated code, or vendored

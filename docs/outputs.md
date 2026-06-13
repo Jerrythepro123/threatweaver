@@ -28,12 +28,8 @@ Checkpoints under `<target>/checkpoints/*.pkl` (delete to force a fresh
 run; the auto-derived `step1.yaml` lives here too). Batch mode also
 writes `<workspace>/batch_summary.md`.
 
-> **Checkpoint loading is restricted.** On `--resume`, checkpoints are
-> deserialized through an allow-list that only reconstructs the tool's own
-> data types — a checkpoint referencing anything else (a tampered or
-> foreign-version file) is **refused** and the stage simply re-runs, rather
-> than being trusted. Only resume from checkpoints you produced yourself; do
-> not `--resume` a scan of an untrusted repository.
+> Only resume from checkpoints you produced yourself; do not `--resume` a
+> scan of an untrusted repository.
 
 `output.preserve_on_cleanup` in `config.yaml` controls which folders
 survive when cloned source is deleted (default: `[checkpoints, security-scan]`).
