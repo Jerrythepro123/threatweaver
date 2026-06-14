@@ -228,10 +228,9 @@ Per target, under `<target>/security-scan/`:
 - **No published accuracy numbers yet.** Precision/recall figures are not yet
   published.
 - **Elevated Privilege** This tool runs with elevated privilege and must only be
-  used against trusted repositories by authorized operators. Running VVAH
-  against untrusted and malicious input and repositories may expose host
-  credentials, API keys, and sensitive files, or expose you to other security
-  issues.
+  used against trusted repositories by authorized operators; running it against
+  untrusted input without the recommended hardening controls may expose host
+  credentials, API keys, and sensitive files to exfiltration or pipeline bypass.
 
 See `docs/` for configuration, models, pipeline, and output details.
 
