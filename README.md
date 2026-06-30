@@ -308,30 +308,11 @@ SQLite state DB at `$VVAHARNESS_STATE_DIR/vvaharness.db` (default
   `vvaharness estimate` and the `step*.max_budget_usd` knobs.
 - **No published accuracy numbers yet.** Precision/recall figures are not yet
   published.
-- **Validation (S11) is Anthropic-only.** The validation panel runs only on
-  Anthropic models (`via: cli` or `via: sdk`); a `via: openai` validate role is
-  refused (the validate step aborts with exit code 2). Detection (S1–S9) and
-  **report-only** remediation can still run on OpenAI-compatible models (but
-  remediation _fix mode_ cannot — see the next item).
-- **Remediation _fix mode_ is effectively Anthropic-only.** Applying a fix needs
-  the agent's file-mutation tools (`Edit`/`Write`), which only the `via: cli` and
-  `via: sdk` (Anthropic) backends expose; the OpenAI-compatible backend is
-  sandboxed to Read/Glob/Grep and **cannot edit files**. A `via: openai`
-  `models.remediate` role therefore can only run `--mode report-only` (it
-  proposes fixes, applies none) — there is no hard error, the agent simply has no
-  way to write the edits. The shipped default profile uses an Anthropic `via: cli`
-  remediate role, so fix mode works out of the box.
-- **Review remediation fixes before you rely on them.** The remediation agent
-  proposes — and in fix mode applies — code changes, but vvaharness does **not**
-  compile, build, or run tests against the patched tree. Always review the
-  generated fixes and build/test them yourself before merging.
-- **Elevated privilege.** This tool runs with elevated privilege and must only be
+- **Elevated Privilege** This tool runs with elevated privilege and must only be
   used against trusted repositories by authorized operators. Running VVAH
   against untrusted and malicious input and repositories may expose host
   credentials, API keys, and sensitive files, or expose you to other security
-  issues. If you must scan a less-trusted target, see
-  [`docs/security.md` → Hardening for less-trusted or sensitive targets](docs/security.md#hardening-for-less-trusted-or-sensitive-targets)
-  for compensating controls.
+  issues.
 
 See `docs/` for configuration, models, pipeline, and output details.
 
