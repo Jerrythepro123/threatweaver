@@ -1,0 +1,340 @@
+# Copyright 2026 Visa, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests for combined-report augmentation: validation results written into SARIF + MD."""
+import json
+from pathlib import Path
+
+from vvaharness.validation.models import RemediationReport, ValidationResult
+from vvaharness.validation.report.augment import augment_reports
+
+# Fixture scores asserted below; named so the comparisons avoid bare magic literals.
+_FIX_CONFIDENCE = 0.89
+_ROOT_CAUSE_WEIGHT = 0.43
+
+_SARIF = {
+    "version": "2.1.0",
+    "runs": [{
+        "tool": {"driver": {"name": "Agentic SAST"}},
+        "results": [{
+            "ruleId": "CWE-862",
+            "level": "error",
+            "message": {"text": "Missing authz on mutations  [CVSS 9.8]"},
+            "locations": [{"physicalLocation": {
+                "artifactLocation": {"uri": "app/svc.py"},
+                "region": {"startLine": 134},
+            }}],
+            "properties": {"severity": "high"},
+        }],
+    }],
+}
+
+_MD = """# Agentic SAST — demo
+
+## Findings (1)
+
+### 1. [HIGH] Missing authz on mutations
+
+#### Description
+Unauthenticated mutation endpoints.
+
+## Analysis
+Confirmed.
+"""
+
+
+def _report() -> RemediationReport:
+    return RemediationReport.model_validate({
+        "finding_id": "F-1",
+        "status": "awaiting_validation",
+        "finding": {"title": "Missing authz on mutations", "file": "app/svc.py", "line_start": 134},
+        "patch": {"diff": "", "files_touched": ["app/svc.py"]},
+    })
+
+
+def _result() -> ValidationResult:
+    return ValidationResult(
+        finding_number=0, tracking_id="F-1", finding_title="Missing authz on mutations",
+        finding_description="", affected_files="app/svc.py",
+        fixed="Yes", partially_fixed="No", not_fixed="No",
+        files_needing_fixes="", reason_for_decision="Fixed (0.89)",
+        severity="High", pr_merge_readiness="Ready", recommendations="",
+        fix_confidence=_FIX_CONFIDENCE,
+        gate_results_json=json.dumps(
+            {"root_cause": {"status": "pass", "weight": _ROOT_CAUSE_WEIGHT,
+                            "weighted_score": _ROOT_CAUSE_WEIGHT}},
+        ),
+        justification="All mutation routes now require auth.",
+    )
+
+
+def _combined_repo(tmp_path: Path) -> Path:
+    """Repo whose s10 combined report already sits in security-remediation/ (what s11 enriches)."""
+    rem = tmp_path / "security-remediation"
+    rem.mkdir(parents=True)
+    (rem / "demo_report.sarif").write_text(json.dumps(_SARIF, indent=2))
+    (rem / "demo_report.md").write_text(_MD)
+    return tmp_path
+
+
+# ---------------------------------------------------------------------------
+
+
+def test_augments_report_in_security_remediation(tmp_path: Path) -> None:
+    repo = _combined_repo(tmp_path)
+    augment_reports(repo, [(_report(), _result())])
+    doc = json.loads((repo / "security-remediation" / "demo_report.sarif").read_text())
+    assert "validation" in doc["runs"][0]["results"][0]
+
+
+def test_sarif_gains_validation_block(tmp_path: Path) -> None:
+    repo = _combined_repo(tmp_path)
+    augment_reports(repo, [(_report(), _result())])
+    doc = json.loads((repo / "security-remediation" / "demo_report.sarif").read_text())
+    block = doc["runs"][0]["results"][0]["validation"]
+    assert block["validationStatus"] == "fixed"
+    assert block["weightedScore"] == _FIX_CONFIDENCE
+    assert block["mergeReadiness"] == "Ready"
+    assert block["gateScores"]["root_cause"]["weighted_score"] == _ROOT_CAUSE_WEIGHT
+
+
+def test_scan_dir_is_never_read(tmp_path: Path) -> None:
+    # A report planted in security-scan/ must be ignored — validation only reads
+    # security-remediation/. The scan copy stays pristine; the remediation copy is augmented.
+    repo = _combined_repo(tmp_path)
+    scan = repo / "security-scan"
+    scan.mkdir(parents=True)
+    (scan / "demo_report.sarif").write_text(json.dumps(_SARIF, indent=2))
+    (scan / "demo_report.md").write_text(_MD)
+    augment_reports(repo, [(_report(), _result())])
+    scan_doc = json.loads((scan / "demo_report.sarif").read_text())
+    assert "validation" not in scan_doc["runs"][0]["results"][0]
+    rem_doc = json.loads((repo / "security-remediation" / "demo_report.sarif").read_text())
+    assert "validation" in rem_doc["runs"][0]["results"][0]
+
+
+def test_md_gains_validation_section(tmp_path: Path) -> None:
+    repo = _combined_repo(tmp_path)
+    augment_reports(repo, [(_report(), _result())])
+    md = (repo / "security-remediation" / "demo_report.md").read_text()
+    assert "### Validation" in md
+    assert str(_FIX_CONFIDENCE) in md
+    assert "**Status:** Fixed" in md
+    assert "root_cause" in md  # gate table rendered
+
+
+def test_idempotent_no_duplicate_section(tmp_path: Path) -> None:
+    repo = _combined_repo(tmp_path)
+    augment_reports(repo, [(_report(), _result())])
+    augment_reports(repo, [(_report(), _result())])
+    md = (repo / "security-remediation" / "demo_report.md").read_text()
+    assert md.count("### Validation") == 1
+    doc = json.loads((repo / "security-remediation" / "demo_report.sarif").read_text())
+    # still a single validation block, not nested/duplicated
+    assert isinstance(doc["runs"][0]["results"][0]["validation"], dict)
+
+
+def test_partially_fixed_status(tmp_path: Path) -> None:
+    repo = _combined_repo(tmp_path)
+    res = _result()
+    res.fixed, res.partially_fixed = "No", "Yes"
+    augment_reports(repo, [(_report(), res)])
+    doc = json.loads((repo / "security-remediation" / "demo_report.sarif").read_text())
+    assert doc["runs"][0]["results"][0]["validation"]["validationStatus"] == "partially_fixed"
+
+
+def test_missing_combined_report_no_crash(tmp_path: Path) -> None:
+    # no combined report in security-remediation/ → best-effort no-op, no exception
+    augment_reports(tmp_path, [(_report(), _result())])
+    assert not (tmp_path / "security-remediation").exists()
+
+
+# A combined report as s10 leaves it: the finding, then a report-level
+# ``## Remediation Summary`` H2 appended at EOF.
+_MD_WITH_SUMMARY = """# Agentic SAST — demo
+
+## Findings (1)
+
+### 1. [HIGH] Missing authz on mutations
+
+#### Description
+Unauthenticated mutation endpoints.
+
+## Remediation Summary
+- 1 finding remediated.
+"""
+
+
+def _combined_repo_with_summary(tmp_path: Path) -> Path:
+    rem = tmp_path / "security-remediation"
+    rem.mkdir(parents=True)
+    (rem / "demo_report.sarif").write_text(json.dumps(_SARIF, indent=2))
+    (rem / "demo_report.md").write_text(_MD_WITH_SUMMARY)
+    return tmp_path
+
+
+def test_md_validation_stays_above_report_summary(tmp_path: Path) -> None:
+    # The per-finding ``### Validation`` must land above the report-level
+    # ``## Remediation Summary`` s10 appended at EOF, and the summary is preserved.
+    repo = _combined_repo_with_summary(tmp_path)
+    augment_reports(repo, [(_report(), _result())])
+    md = (repo / "security-remediation" / "demo_report.md").read_text()
+    assert "### Validation" in md
+    assert "## Remediation Summary" in md
+    assert "1 finding remediated." in md  # summary body preserved
+    assert md.index("### Validation") < md.index("## Remediation Summary")
+
+
+def test_md_summary_ordering_idempotent(tmp_path: Path) -> None:
+    repo = _combined_repo_with_summary(tmp_path)
+    augment_reports(repo, [(_report(), _result())])
+    augment_reports(repo, [(_report(), _result())])
+    md = (repo / "security-remediation" / "demo_report.md").read_text()
+    assert md.count("### Validation") == 1
+    assert md.count("## Remediation Summary") == 1
+    assert md.index("### Validation") < md.index("## Remediation Summary")
+
+
+# ---------------------------------------------------------------------------
+# agent-authored text is neutralized before it reaches the Markdown report
+# ---------------------------------------------------------------------------
+
+
+def test_md_escape_neutralizes_injection() -> None:
+    from vvaharness.validation.report.augment import _md_escape
+    out = _md_escape("see <script>alert(1)</script> [link](x) `code`\nsecond line\x00")
+    assert "<script>" not in out and "&lt;script&gt;" in out  # HTML defanged
+    assert "\\[" in out and "\\`" in out                      # link/code syntax escaped
+    assert "\n" not in out                                    # newlines collapsed
+    assert "\x00" not in out                                  # control chars stripped
+
+
+def test_md_cell_escapes_pipe_and_bounds_length() -> None:
+    from vvaharness.validation.report.augment import _md_cell
+    assert "\\|" in _md_cell("a | b")        # table delimiter escaped
+    assert len(_md_cell("x" * 500)) <= 200   # cell length bounded
+
+
+def test_malicious_justification_renders_inert(tmp_path: Path) -> None:
+    repo = _combined_repo(tmp_path)
+    result = _result()
+    evil = result.model_copy(update={
+        "justification": "Fixed </td><script>steal()</script> | extra `cmd` [x](y)",
+    })
+    augment_reports(repo, [(_report(), evil)])
+    md = (repo / "security-remediation" / "demo_report.md").read_text()
+    assert "<script>" not in md            # the raw tag never reaches the rendered report
+    assert "&lt;script&gt;" in md
+
+
+# ---------------------------------------------------------------------------
+# report pinning (#2): read from security-remediation/, survive repeated cycles
+# ---------------------------------------------------------------------------
+
+
+def _write_combined(repo: Path, stem: str, md: str = _MD) -> Path:
+    rem = repo / "security-remediation"
+    rem.mkdir(parents=True, exist_ok=True)
+    (rem / f"{stem}.sarif").write_text(json.dumps(_SARIF, indent=2))
+    md_path = rem / f"{stem}.md"
+    md_path.write_text(md)
+    return md_path
+
+
+def _has_validation(repo: Path, stem: str) -> bool:
+    doc = json.loads((repo / "security-remediation" / f"{stem}.sarif").read_text())
+    return "validation" in doc["runs"][0]["results"][0]
+
+
+def test_multi_run_enriches_newest(tmp_path: Path) -> None:
+    # Two remediation cycles leave two timestamped reports; the newest (latest cycle,
+    # matching the current DTOs) is enriched, the older one is left untouched.
+    _write_combined(tmp_path, "demo_20260101T000000Z_report")
+    _write_combined(tmp_path, "demo_20260202T000000Z_report")
+    augment_reports(tmp_path, [(_report(), _result())])
+    assert _has_validation(tmp_path, "demo_20260202T000000Z_report")
+    assert not _has_validation(tmp_path, "demo_20260101T000000Z_report")
+
+
+def test_explicit_report_md_overrides_newest(tmp_path: Path) -> None:
+    _write_combined(tmp_path, "demo_20260101T000000Z_report")
+    _write_combined(tmp_path, "demo_20260202T000000Z_report")
+    older = tmp_path / "security-remediation" / "demo_20260101T000000Z_report.md"
+    augment_reports(tmp_path, [(_report(), _result())], report_md=older)
+    assert _has_validation(tmp_path, "demo_20260101T000000Z_report")
+    assert not _has_validation(tmp_path, "demo_20260202T000000Z_report")
+
+
+def test_explicit_scan_report_md_rebased_to_remediation(tmp_path: Path) -> None:
+    # In-pipeline scan.py passes the canonical report_md under security-scan/; the locator must
+    # rebase it onto security-remediation/ and leave the pristine scan copy untouched.
+    repo = _combined_repo(tmp_path)
+    scan = repo / "security-scan"
+    scan.mkdir(parents=True)
+    (scan / "demo_report.sarif").write_text(json.dumps(_SARIF, indent=2))
+    (scan / "demo_report.md").write_text(_MD)
+    augment_reports(repo, [(_report(), _result())], report_md=scan / "demo_report.md")
+    rem_doc = json.loads((repo / "security-remediation" / "demo_report.sarif").read_text())
+    assert "validation" in rem_doc["runs"][0]["results"][0]
+    scan_doc = json.loads((scan / "demo_report.sarif").read_text())
+    assert "validation" not in scan_doc["runs"][0]["results"][0]
+
+
+# ---------------------------------------------------------------------------
+# fail-closed matching (#3) + path-separator robustness (#6)
+# ---------------------------------------------------------------------------
+
+
+def _pair(title: str, justification: str, line: int = 134) -> tuple[RemediationReport, ValidationResult]:
+    report = RemediationReport.model_validate({
+        "finding_id": title, "status": "awaiting_validation",
+        "finding": {"title": title, "file": "app/svc.py", "line_start": line},
+        "patch": {"diff": "", "files_touched": ["app/svc.py"]},
+    })
+    result = _result().model_copy(update={"finding_title": title, "justification": justification})
+    return (report, result)
+
+
+_MD_ONE_HEADING = "# R\n\n## Findings\n\n### 1. [HIGH] {t}\n\n#### Description\nx\n"
+
+
+def test_duplicate_titles_render_skipped(tmp_path: Path) -> None:
+    # Two findings share the exact heading title → ambiguous → no validation section attached.
+    _write_combined(tmp_path, "demo_report", md=_MD_ONE_HEADING.format(t="Auth bug"))
+    augment_reports(tmp_path, [_pair("Auth bug", "AAA"), _pair("Auth bug", "BBB")])
+    out = (tmp_path / "security-remediation" / "demo_report.md").read_text()
+    assert "### Validation" not in out
+
+
+def test_overlapping_titles_attribute_correctly(tmp_path: Path) -> None:
+    # Heading "SQL injection" must attach to the exact-title finding, not the overlapping
+    # "SQL injection in reports" (the old first-bidirectional-substring bug). B is listed first.
+    _write_combined(tmp_path, "demo_report", md=_MD_ONE_HEADING.format(t="SQL injection"))
+    augment_reports(tmp_path, [_pair("SQL injection in reports", "BBB", line=200),
+                               _pair("SQL injection", "AAA")])
+    out = (tmp_path / "security-remediation" / "demo_report.md").read_text()
+    assert "AAA" in out and "BBB" not in out
+
+
+def test_loc_match_path_separator_insensitive(tmp_path: Path) -> None:
+    # SARIF uri uses "/", the DTO file uses "\\"; location match must still succeed (title differs).
+    _write_combined(tmp_path, "demo_report")
+    report = RemediationReport.model_validate({
+        "finding_id": "F-1", "status": "awaiting_validation",
+        "finding": {"title": "Totally different title", "file": "app\\svc.py", "line_start": 134},
+        "patch": {"diff": "", "files_touched": ["app\\svc.py"]},
+    })
+    augment_reports(tmp_path, [(report, _result())])
+    doc = json.loads((tmp_path / "security-remediation" / "demo_report.sarif").read_text())
+    assert "validation" in doc["runs"][0]["results"][0]

@@ -189,6 +189,42 @@ def test_load_local_non_mapping_raises(tmp_path):
         load(base)
 
 
+def test_load_local_override_logs_overridden_keys(tmp_path, capsys):
+    # The overlay merge must be VISIBLE: log the file + the top-level keys it
+    # overrides (it can change model routing / base_url / TLS / tool perms).
+    base = tmp_path / "config.yaml"
+    base.write_text("models:\n  deepdive: base\nsdk:\n  base_url: x\n", encoding="utf-8")
+    local = tmp_path / "config.local.yaml"
+    local.write_text("models:\n  deepdive: overridden\nsdk:\n  base_url: y\n", encoding="utf-8")
+    c = load(base)
+    assert c.models.deepdive == "overridden"          # merge still happens
+    err = capsys.readouterr().err
+    assert "config overlay" in err and "applied" in err
+    assert "models" in err and "sdk" in err            # overridden keys surfaced
+
+
+def test_load_no_local_config_skips_merge(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("VVAHARNESS_NO_LOCAL_CONFIG", "1")
+    base = tmp_path / "config.yaml"
+    base.write_text("models:\n  deepdive: base\n", encoding="utf-8")
+    local = tmp_path / "config.local.yaml"
+    local.write_text("models:\n  deepdive: overridden\n", encoding="utf-8")
+    c = load(base)
+    assert c.models.deepdive == "base"                 # overlay NOT applied
+    err = capsys.readouterr().err
+    assert "SKIPPED" in err and "VVAHARNESS_NO_LOCAL_CONFIG" in err
+
+
+def test_load_overlay_log_deduped(tmp_path, capsys):
+    # load() runs several times per process; the overlay line logs once per path.
+    base = tmp_path / "config.yaml"
+    base.write_text("a: 1\n", encoding="utf-8")
+    (tmp_path / "config.local.yaml").write_text("a: 2\n", encoding="utf-8")
+    load(base)
+    load(base)
+    assert capsys.readouterr().err.count("config overlay") == 1
+
+
 # --------------------------------------------------------------------------
 # _replace_merge / _append_merge
 # --------------------------------------------------------------------------

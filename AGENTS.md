@@ -44,7 +44,23 @@ If the tool genuinely misbehaves after `setup` is green, report it as a bug
 ## What this tool does
 A 9-stage LLM SAST pipeline: survey → threat-model → decompose → deep-dive →
 pre-filter → adversarial-verify → dedup → chain → SARIF. It emits a Markdown
-report + SARIF 2.1.0. See `docs/SKILLS.md` for the analysis capabilities.
+report + SARIF 2.1.0.
+
+> ⚠️ **The default profile does more than scan — it also remediates and
+> validates.** With the shipped `default.yaml` (`step_remediate.enabled: true`
+> and `step_validate.enabled: true`), `vvaharness scan` continues past s9 into
+> **Step 10 — Remediate** and **Step 11 — Validate** (an 11-step run). Step 10
+> runs the Remediation Agent in **fix mode: it edits source files in the target
+> repo** and writes `<repo>/security-remediation/`. Step 11 then runs the
+> agentic validation panel over those fixes. If you only want detection (no
+> changes to the target), pass `--stop-after s9`, or use a profile with
+> `step_remediate.enabled: false` / `step_validate.enabled: false`.
+
+`remediate` and `validate` are also standalone commands: `vvaharness remediate`
+proposes/applies fixes over a prior scan's findings, and `vvaharness validate`
+runs the agentic adversarial panel over the remediation DTOs (s11 panel —
+which first discovers the DTOs awaiting validation, then runs the panel). See `docs/SKILLS.md` for the analysis capabilities and
+`docs/USER_GUIDE.md` for the full command/flag reference.
 
 ## First run — always start here
 ```bash
@@ -58,8 +74,11 @@ what it says, then re-run `setup` until it prints **Ready ✓**.
 | You have… | Use | How |
 |---|---|---|
 | Claude Code auth (`claude login` / gateway token) | `default` | default — no flag |
-| `ANTHROPIC_SDK_API_KEY` (sk-ant-…) and/or `OPENAI_API_KEY` | `full` | `--config vvaharness/config/profiles/full.yaml` |
-| Claude Code auth, want Bash listed in `allowed_tools` | `cli` | `--config vvaharness/config/profiles/cli.yaml` |
+| `ANTHROPIC_SDK_API_KEY` (sk-ant-…) | `sdk` | `--config vvaharness/config/profiles/sdk.yaml` |
+| Multi-provider (Anthropic SDK + `OPENAI_API_KEY`) | `full` | `--config vvaharness/config/profiles/full.yaml` |
+
+No shipped profile enables `Bash`. To let a `via: cli` role shell out, add
+`- Bash` to its `allowed_tools` in your own copy (trusted targets only).
 
 ### Internal gateway note (common cause of 401)
 If `ANTHROPIC_API_KEY` is a JWT (`eyJ…`) you are using a gateway/Claude-Code
@@ -69,7 +88,7 @@ export ANTHROPIC_BASE_URL=https://<your-gateway>/
 export NODE_EXTRA_CA_CERTS=$HOME/cacerts.pem   # if it needs a private CA
 export CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 # if the gateway returns "400 invalid beta flag"
 ```
-`vvaharness setup` auto-detects this and prints the exact lines. Set them in
+`vvaharness setup` auto-detects this and prints the exact lines **when the active profile uses a `via: sdk` role** (e.g. `sdk`/`full`). The shipped default profile is all `via: cli`, so `setup` will not auto-print these — set them yourself if your gateway token needs them. Set them in
 your shell or `.env` — **do not** edit the package to work around it.
 
 ## Running a scan
@@ -77,9 +96,13 @@ your shell or `.env` — **do not** edit the package to work around it.
 vvaharness estimate --repo /path/to/target          # scope/cost preview, no spend
 vvaharness scan --repo /path/to/target --application-id <id> [--config <profile>]
 ```
-- Progress prints per stage (`▶ … / ✓ … (Ns)`).
+- Progress prints per stage (`▶ … / ✓ … (Ns)`). With the default profile the
+  counter runs to **11** (s1–s9 scan, then s10 remediate, s11 validate).
 - Output: `<target>/security-scan/*_report.md`, `*.sarif`, `*_errors.jsonl`.
-- A `run_manifest.json` records models/config/timing for the run.
+- With the default profile, a scan **also** writes `<target>/security-remediation/`
+  and **edits source files in the target repo** (s10 fix-mode remediation), then
+  validates those fixes (s11). Use `--stop-after s9` for detection only.
+- A `run_manifest.json` (written in the current working directory, not under `security-scan/`) records models/config/timing for the run.
 - Findings are **triage candidates, not confirmed vulnerabilities** — say so
   when you summarize them.
 
@@ -95,6 +118,21 @@ vvaharness scan --repo /path/to/target --application-id <id> [--config <profile>
   first and scope with `--repo <subdir>` or `--stop-after s3`.
 - Scan only code you are authorized to scan.
 - The tool never prints credential values; keep it that way.
+- **Validation runs in-scan by default, and is also a standalone command.**
+  With the default profile it executes as Step 11 of `scan` (see the warning
+  under *What this tool does*); run on its own, `vvaharness validate --repo <path>`
+  discovers remediation DTOs written by the `remediate` command (s10, no model
+  spend) and runs an agentic adversarial panel (s11) to fill each DTO's
+  `validation` block. It uses the bundled Claude Agent SDK (Python ≥3.10) and an
+  Anthropic model (`models.validate` must
+  be `via: cli` or `via: sdk`; a `via: openai` validate model is refused when the
+  validate step starts, before any model spend — the standalone `validate`
+  command exits non-zero, and inside a `scan` Step 11 is skipped with a warning
+  while the rest of the scan still completes). The panel
+  runs in the Claude Agent SDK's permission sandbox: it reads the repo and writes
+  only its own validation artifacts — there is no Docker, and nothing is applied
+  to the scanned repo. Re-runs are idempotent (already-`validated` DTOs are skipped;
+  `validation_failed` / `needs_review` stay re-validatable).
 
 ## Do / Don't (quick reference)
 | ✅ Do | ❌ Don't |

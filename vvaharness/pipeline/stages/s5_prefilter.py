@@ -31,7 +31,7 @@ mechanically:
 
 Not checkpointed — the deterministic gates are ~0ms and the optional semantic
 call is one cheap dedup-model invocation, both re-run against the loaded s4
-pickle on --resume.
+checkpoint on --resume.
 """
 from __future__ import annotations
 import re

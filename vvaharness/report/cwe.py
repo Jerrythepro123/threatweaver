@@ -107,6 +107,36 @@ def cwe_name(cwe_id: str | None) -> str:
     return CWE_NAMES.get(cwe_id.upper().strip(), "")
 
 
+# B1: VulnClass → canonical CWE fallback. Many s4 findings carry only
+# `vuln_class`; this map lets `cwe_for` resolve a CWE deterministically when
+# `Finding.cwe` is None — without changing the s4 prompt or trusting an
+# LLM-emitted CWE.
+VULNCLASS_CWE: dict[str, str] = {
+    "use-after-free":         "CWE-416",
+    "heap-overflow":          "CWE-122",
+    "stack-overflow":         "CWE-121",
+    "format-string":          "CWE-134",
+    "integer-overflow":       "CWE-190",
+    "type-confusion":         "CWE-843",
+    "race-condition":         "CWE-362",
+    "injection":              "CWE-74",     # generic injection parent
+    "unsafe-deserialization": "CWE-502",
+    "logic-flaw":             "CWE-840",
+    "info-leak":              "CWE-200",
+    "other":                  "",           # unresolved → no CWE
+}
+
+
+def cwe_for(cwe_id: str | None, vuln_class) -> str | None:
+    """Return `cwe_id` if set, else the VulnClass fallback, else None.
+    `vuln_class` may be a VulnClass enum or its `.value` string."""
+    if cwe_id:
+        return cwe_id.upper().strip()
+    key = getattr(vuln_class, "value", None) or str(vuln_class or "")
+    fb = VULNCLASS_CWE.get(key, "")
+    return fb or None
+
+
 def cwe_label(cwe_id: str | None) -> str:
     """'CWE-862 - Missing Authorization' or just 'CWE-862' if name unknown."""
     if not cwe_id:

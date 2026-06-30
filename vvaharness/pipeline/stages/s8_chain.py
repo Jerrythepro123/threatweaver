@@ -119,6 +119,21 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg, *,
                     f"{len(findings)} verified findings reported unranked.",
         )
 
+    # HB-009 recoverability: persist the FULL raw chain response next to the
+    # errors log BEFORE parsing, so a parse/hydration failure is salvageable
+    # offline without re-spending the s8 call. Best-effort — never let a disk
+    # error here crash the final pipeline step.
+    try:
+        errp = _errlog.current_path()
+        stem = (errp.name[:-len("_errors.jsonl")]
+                if errp.name.endswith("_errors.jsonl") else errp.stem)
+        raw_path = errp.parent / f"{stem}_s8_raw.txt"
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_text(redact(raw or ""), encoding="utf-8")
+    except OSError as e:
+        print(f"  [s8] WARN: could not persist raw chain response "
+              f"({redact(str(e))})", file=sys.stderr)
+
     try:
         data = extract_json(raw)
         if isinstance(data, list):

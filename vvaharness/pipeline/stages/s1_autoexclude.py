@@ -20,7 +20,7 @@ survey (dir tree + file counts + extension histogram + build-file excerpts),
 then sends that survey as a single SDK prompt to Opus and asks which
 directories, extensions and glob patterns are NON-production noise. The
 result is written as a step1 overlay YAML that config.apply_step1_overlay()
-can layer on top of the global step1 — so the real s1→s9 scan only sees
+can layer on top of the global step1 — so the real s1→s11 scan only sees
 genuine attack surface.
 
 The model is told what is ALREADY excluded (built-ins + config.yaml step1 +

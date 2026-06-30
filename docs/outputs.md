@@ -22,17 +22,42 @@ Per target, under `<target>/security-scan/`:
 
 - `<module>_<ts>_report.md`
 - `<module>_<ts>_report.sarif`
-- `<module>_<ts>_errors.jsonl`
+- `<module>_<ts>_errors.jsonl` (only written if a recoverable error was logged; absent on a clean run)
 
-Checkpoints under `<target>/checkpoints/*.pkl` (delete to force a fresh
-run; the auto-derived `step1.yaml` lives here too). Batch mode also
-writes `<workspace>/batch_summary.md`.
+Remediation artifacts live separately, under
+`<repo>/security-remediation/<NN_slug>/` (written by the `remediate` command).
+The `validate` command updates each finding's DTO in place:
+
+- `remediate_report.json` — the persistent per-finding DTO at `<NN_slug>/`;
+  `validate` fills its `validation` block and advances `status` to one of
+  `validated` (fix passed), `validation_failed` (fix did not pass;
+  re-validatable), or `needs_review` (session could not produce a verdict)
+- `validation_report.json` — the agentic panel's per-DTO findings
+- `synthesized_gates.json` — the weighted gate scores behind the verdict
+
+`validation_report.json` and `synthesized_gates.json` are *ephemeral*: they are
+written to the per-finding staging workspace under
+`<repo>/security-remediation/validation/<finding_id>/`, folded into the DTO's
+`validation` block, and then the workspace is deleted after each finding. Only
+`remediate_report.json` (plus the redacted `validation_session_*.jsonl`
+transcript persisted beside it) survives under `<NN_slug>/`.
+
+Checkpoints in the SQLite state DB at `$VVAHARNESS_STATE_DIR/vvaharness.db`
+(default `~/.vvaharness/state/vvaharness.db`; run `vvaharness gc` or delete
+the file to force a fresh run). Payloads are JSON bytes, schema-validated
+via pydantic on load (no pickle / no code-execution path), and are never
+read from the scanned repo. The auto-derived `step1.yaml` (`--auto-step1`)
+is still a plain file under `$VVAHARNESS_STATE_DIR/checkpoints/<run_id>/`.
+Batch mode also writes `<workspace>/batch_summary.md`.
 
 > Only resume from checkpoints you produced yourself; do not `--resume` a
 > scan of an untrusted repository.
 
-`output.preserve_on_cleanup` in `config.yaml` controls which folders
-survive when cloned source is deleted (default: `[checkpoints, security-scan]`).
+`output.preserve_on_cleanup` in `config.yaml` controls which folders inside
+the clone survive when cloned source is deleted. The shipped profiles preserve
+`[security-scan, security-remediation]`; if the key is omitted entirely the
+built-in fallback keeps `[security-scan]` only. Checkpoints live outside the
+clone, so `--resume` works regardless of cleanup.
 
 ## Markdown report — finding block
 
@@ -42,12 +67,14 @@ SARIF parser reads each by regex):
 
 ```
 ### N. [SEVERITY] Title
-**Class:** <vuln-class>
+**Class:** <CWE-NNN: name, or the vuln-class when no CWE resolves>
+**CWE:** CWE-NNN: name - https://cwe.mitre.org/...   (if a CWE resolved)
 **File:** `path:start-end`
 **CVSS 3.1:** score (rating) — `vector`
 **VulContextSeverity:** `env-vector` - score (rating)   (if CMDB enrichment ran)
 **OffensivePriority:** Pn - label | reason
-**Confidence:** 0.NN (V of N runs agreed)
+**Confidence:** 0.NN (N runs agreed)
+**Also at:** `file:line`, …   (if s7 dedup collapsed other call sites)
 
 #### Description
 #### Impact
@@ -69,11 +96,13 @@ emits SARIF. Per finding:
 | `[SEVERITY]` | `level`, `properties.severity` |
 | Title + CVSS | `message.text` |
 | `**Class:**` | `ruleId`, `properties.category` |
+| `**CWE:**` (parsed token, else VulnClass fallback) | `properties.{cwe,cweId,cweName}`, result `taxa[]` (resolves against the CWE taxonomy) |
 | `**File:**` line | `locations[0].physicalLocation.{artifactLocation.uri, region.startLine}` |
 | `**CVSS 3.1:**` | `rank` (CVSS 0–10 scaled to SARIF's 0–100), `properties.{cvssVector,cvssScore,cvssRating,security-severity}` |
 | `**VulContextSeverity:**` | `properties.{vulContextSeverityVector,vulContextSeverityScore,vulContextSeverityRating}` |
 | `**OffensivePriority:**` | `properties.{offensivePriority,offensivePriorityLabel,offensivePriorityReason}` |
-| `**Confidence:**` | `properties.confidence`, `properties.votes` |
+| `**Confidence:**` | `properties.confidence` (and `properties.votes` only when the line carries an explicit `N of M runs` count — the pipeline's `(N runs agreed)` form does not, so `votes` is normally absent) |
+| `**Also at:**` line | `relatedLocations[]`, `properties.dedupRelatedLocationCount` |
 | Description → Verification | `properties.description` (markdown body, ≤4000 chars) |
 
 Run-level `properties` always carries `applicationId`; `applicationName` and
@@ -84,14 +113,16 @@ application (i.e. CMDB enrichment ran). The SARIF `tool.driver.name` is
 so each result's `taxa[]` resolves. When the scan was degraded (deep-dive chunks
 failed, or the exploit-chain pass could not be computed) the run carries an
 `invocations[]` entry with `executionSuccessful=false` and per-stage
-`toolExecutionNotifications`; a clean run reports `executionSuccessful=true`.
+`toolExecutionNotifications`. `executionSuccessful=false` is set only when the exploit-chain pass falls back (the degraded banner); deep-dive chunk failures emit `toolExecutionNotifications` (and the markdown Scan Health section) but leave `executionSuccessful=true`. A clean run reports `executionSuccessful=true` with no notifications.
 
 ### Scan Health (markdown)
 
-When a run loses coverage — deep-dive chunks that failed or timed out, or a
-chain pass that could not be computed — the report adds a `## Scan Health`
+When a run loses coverage — deep-dive chunks that failed or timed out, a
+chain pass that could not be computed, or any stage that logged a recoverable
+error — the report adds a `## Scan Health`
 section listing chunks attempted/failed, per-stage error counts, and a pointer
-to the per-run `*_errors.jsonl`. A clean run omits the section entirely. Note: a
+to the per-run `*_errors.jsonl`. A fully clean run (no failed chunks, no chain
+fallback, no logged errors) omits the section entirely. Note: a
 run that simply found no exploit chains is **not** degraded — that is a normal
 outcome and is stated as "No exploit chains were identified".
 

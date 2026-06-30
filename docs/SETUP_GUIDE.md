@@ -25,10 +25,10 @@ reference, see **[USER_GUIDE.md](USER_GUIDE.md)**.
 
 | Need | Why |
 |---|---|
-| **Python ≥ 3.10**, 64-bit | runtime. The CLI also checks this at startup and exits with a clear message on older interpreters. |
+| **Python ≥ 3.10** | runtime. The CLI checks the Python version at startup and exits with a clear message on older interpreters. |
 | **git** on `PATH` | only for batch clone mode (`--repo-file`). |
-| **Claude Code CLI, logged in** | the default profile (`default.yaml` / `cli.yaml`) runs every stage through the `claude` subprocess — run `claude` then `/login`, or set `CLAUDE_CODE_OAUTH_TOKEN`. |
-| **An Anthropic API key / OpenAI key** | only if you switch roles to `via: sdk` / `via: openai` (e.g. the `full.yaml` profile — see §5). |
+| **Claude Code CLI, logged in** | the default profile (`default.yaml`) runs every stage through the `claude` subprocess — run `claude` then `/login`, or set `CLAUDE_CODE_OAUTH_TOKEN`. |
+| **An Anthropic API key / OpenAI key** | only if you switch roles to `via: sdk` / `via: openai` (the `sdk.yaml` profile for an all-SDK run, or `full.yaml` for a multi-backend mix — see §5). |
 
 ---
 
@@ -85,7 +85,8 @@ pip install -e .     # editable — code changes take effect without reinstallin
 All installs expose one command, **`vvaharness`**, and bundle all three
 backends (Anthropic SDK, Claude CLI, OpenAI-compatible) — you only need
 credentials for the ones your config actually uses. Dependencies (`pydantic`,
-`PyYAML`, `anthropic`, `openai`, `httpx`, `urllib3`, `python-dotenv`) are
+`pydantic-settings`, `PyYAML`, `anthropic`, `openai`, `httpx`, `urllib3`,
+`python-dotenv`, `typing_extensions`, `claude-agent-sdk`) are
 declared in `pyproject.toml` and resolved by pip; there is no separate
 requirements file.
 
@@ -104,13 +105,16 @@ $EDITOR .env          # fill in the keys for the backends you use
 
 `vvaharness` **auto-loads** a `.env` found from the current directory upward at
 startup, so you do **not** need to `source` it. Variables you export in your
-shell take precedence over `.env` (handy for CI). The `.env.example` template
+shell take precedence over `.env` (handy for CI). One safety exception: if the
+discovered `.env` resolves *inside* the `--repo` scan target (an
+attacker-influenced checkout), it is ignored with a warning — set
+`VVAHARNESS_ALLOW_CWD_CONFIG=1` to override. The `.env.example` template
 lists every supported variable:
 
 | Variable | Backend / use |
 |---|---|
 | `CLAUDE_CODE_OAUTH_TOKEN` | `via: cli` — the default profile (alternative to interactive `claude` → `/login`) |
-| `ANTHROPIC_SDK_API_KEY` | `via: sdk` roles (e.g. the `full.yaml` profile) |
+| `ANTHROPIC_SDK_API_KEY` | `via: sdk` roles (the all-SDK `sdk.yaml` profile, or the `via: sdk` roles in `full.yaml`) |
 | `ANTHROPIC_SDK_BASE_URL` | optional gateway/region override for `via: sdk` |
 | `ANTHROPIC_SDK_CA_CERT` / `ANTHROPIC_SDK_CLIENT_CERT` | optional TLS CA bundle / mTLS client cert for `via: sdk` |
 | `CLAUDE_CLI_CA_CERT` | optional TLS CA bundle for `via: cli` (→ `NODE_EXTRA_CA_CERTS` on the `claude` subprocess) |
@@ -147,7 +151,7 @@ Install the Claude Code CLI, then authenticate one of two ways:
 > **Enterprise gateway, in short:** export `ANTHROPIC_BASE_URL=https://<gateway>/`,
 > add `NODE_EXTRA_CA_CERTS=$HOME/cacerts.pem` if it uses a private CA, and
 > `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` if it returns `400 invalid beta flag`.
-> `vvaharness setup` auto-detects a gateway token and prints these exact lines.
+> `vvaharness setup` auto-detects the gateway base URL (and CA bundle) and prints these exact lines.
 
 **Base URLs are optional.** If you set only the API key(s) and leave the
 `*_BASE_URL` variables unset, vvaharness uses the official public endpoints
@@ -220,16 +224,21 @@ Notes:
 
 `vvaharness` ships three profiles under `vvaharness/config/profiles/`:
 
-- **`default.yaml`** — every role through the `claude` CLI (`via: cli`) on
-  `claude-sonnet-4-6`. It reuses your Claude Code login, so no
+- **`default.yaml`** — every role through the `claude` CLI (`via: cli`); the
+  scan stages run on a high-volume model and the `remediate` / `validate` roles
+  on a higher-tier reasoning model (exact IDs pinned per role in the profile).
+  It reuses your Claude Code login, so no
   `ANTHROPIC_SDK_API_KEY` is needed. Used automatically when no
   `./config.yaml` is present. The `cli` backend gives the model native
-  Read/Glob/Grep/Bash tools inside the target directory — for untrusted
+  Read/Glob/Grep tools inside the target directory; it is the only
+  backend that *can* run Bash, but Bash is off unless you explicitly add
+  `- Bash` to a role's `allowed_tools` — for untrusted
   targets prefer a `via: sdk` / `via: openai` profile (sandboxed
   Read/Glob/Grep, no shell); see [`security.md`](security.md).
-- **`cli.yaml`** — the same all-`cli` layout, with **Bash** explicitly listed
-  in the agentic stages' `allowed_tools` (`step1`, `step6_verify`) for
-  shell-powered recon and evidence retrieval.
+- **`sdk.yaml`** — every role `via: sdk` (the Anthropic Python SDK; needs
+  `ANTHROPIC_SDK_API_KEY`). Sandboxed Read/Glob/Grep, no Bash. Its
+  deepdive at `temperature: 0.4` enables s4 majority voting (`step4.runs: 3` /
+  `vote_threshold: 2`).
 - **`full.yaml`** — an example multi-backend layout (Claude CLI + OpenAI + SDK
   roles) you can copy and edit:
 
@@ -247,9 +256,28 @@ Key sections (full reference in [configuration.md](configuration.md)):
 
 - `models` — the `{id, via}` per role (see §5).
 - `step1` … `step8` — per-stage budgets, exclusions, and tuning knobs.
+- `step_remediate` / `step_validate` — the remediation (stage 10) and
+  validation (stage 11) stages: `enabled`, budgets, and tool allowlists. Both
+  are ON by default in the shipped profiles (`enabled: true`); set
+  `enabled: false` to opt a run out.
 - `inject` — paths to optional context inputs (see §6).
 - `batch` — clone token / base URL / skip patterns for `--repo-file` mode.
 - `output.preserve_on_cleanup` — folders kept when a clone is purged.
+
+> **Backend limits when repointing `models.remediate` / `models.validate`.**
+> Both default to an Anthropic `via: cli` role, which works out of the box.
+> If you change them: `validate` is **Anthropic-only** — a `via: openai` validate
+> role is refused (the validate step aborts with exit code 2). `remediate` in
+> **fix mode** is also effectively Anthropic-only — applying a fix needs the
+> `Edit`/`Write` tools that only the `via: cli` / `via: sdk` backends expose, so a
+> `via: openai` remediate role can only run `--mode report-only` (it proposes
+> fixes, applies none). Detection (S1–S9) and report-only remediation run on any
+> backend. See [models.md](models.md) and [remediation.md](remediation.md).
+
+> **Scanning a less-trusted or sensitive target?** vvaharness assumes an
+> authorized operator running against a trusted repository. For third-party code,
+> forks, or anything an outside party can influence, apply the compensating
+> controls in [`security.md` → Hardening for less-trusted or sensitive targets](security.md#hardening-for-less-trusted-or-sensitive-targets).
 
 ---
 

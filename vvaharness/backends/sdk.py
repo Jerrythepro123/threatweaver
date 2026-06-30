@@ -158,9 +158,21 @@ def _get_client():
                 client_cert = None
             if verify is not True or client_cert:
                 if verify is False:
+                    # TLS verification is OFF. Suppress urllib3's per-request
+                    # InsecureRequestWarning spam, but NEVER do so silently:
+                    # emit one loud, unmissable warning naming the endpoint so
+                    # an operator can't disable cert/hostname checks unknowingly
+                    # (mirrors backends/claude_cli.py). ca_cert is the secure
+                    # way to trust a private-CA gateway.
                     import warnings
                     import urllib3
                     warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
+                    print(f"WARN [sdk]: TLS verification DISABLED (verify_ssl=false) "
+                          f"for base_url={_cfg['base_url'] or '<default Anthropic endpoint>'} "
+                          f"— prompts, source snippets, outputs and the auth header "
+                          f"are interceptable by an active MITM. Set sdk.ca_cert to a "
+                          f"CA bundle to verify a private-CA gateway instead.",
+                          file=sys.stderr)
                 kw["http_client"] = anthropic.DefaultHttpxClient(verify=verify, cert=client_cert)
             _client = anthropic.Anthropic(**kw)
     return _client
@@ -360,8 +372,13 @@ def prompt(
 # agentic() — Anthropic tool-use loop over the local Read/Glob/Grep executors
 # in backends/localtools.py. Mirrors backends/oai.py:agentic() so `via: sdk` is a
 # drop-in for `via: cli`/`via: openai` on the preprocess and verify roles.
-# Bash is NOT provided (no executor in _localtools); request it and you get a
-# NotImplementedError telling you to switch the role to via:cli.
+#
+# The local loop is read-only (Read/Glob/Grep). When a role legitimately needs
+# file-MUTATION tools (Edit/Write — the Remediation Agent's `fix` mode) or Bash,
+# this backend delegates to backends/agent_sdk.py, which drives the official
+# `claude_agent_sdk` (native Edit/Write/Bash inside a cwd-confined permission
+# sandbox — the same runtime the `vvaharness validate` agent uses). So `via: sdk`
+# stays a drop-in for those roles too, without re-implementing edit tools here.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _AGENTIC_MAX_TOK = 16000
@@ -432,18 +449,28 @@ def agentic(
     max_turns: int | None = None,
     tag: str | None = None,
 ) -> str:
-    client = _get_client()
     turns_cap = int(max_turns) if max_turns else _AGENTIC_MAX_TURNS
     allowed = list(allowed_tools or ["Read", "Glob", "Grep"])
     ok, missing = _localtools.supported(allowed)
     if missing:
-        raise NotImplementedError(
-            f"via:sdk agentic() has no executor for {missing}. "
-            f"Supported: {sorted(ok)}. Drop the unsupported tool from "
-            f"allowed_tools, or set this role to `via: cli` (which provides "
-            f"Read/Glob/Grep/Bash natively)."
+        # The local raw-anthropic loop is read-only (Read/Glob/Grep). A role
+        # that needs file-MUTATION tools (Edit/Write — the Remediation Agent's
+        # `fix` mode) or Bash is routed to the Claude Agent SDK, which provides
+        # those tools natively inside a cwd-confined permission sandbox (the
+        # same runtime the `vvaharness validate` agent uses). This keeps
+        # `via: sdk` a drop-in for fix-mode remediation instead of forcing
+        # via:cli.
+        from vvaharness.backends import agent_sdk as _agent_sdk
+        print(f"    [sdk] agentic requests {missing} (mutating/Bash) — "
+              f"delegating to the Claude Agent SDK backend", file=sys.stderr)
+        return _agent_sdk.agentic(
+            user_prompt, model=model, system_prompt=system_prompt,
+            allowed_tools=allowed, cwd=cwd, max_budget_usd=max_budget_usd,
+            permission_mode=permission_mode, max_turns=max_turns, tag=tag,
         )
+    client = _get_client()
     tools = _localtools.anthropic_schemas_for(ok)
+
 
     base_kw: dict = {"model": model, "max_tokens": _AGENTIC_MAX_TOK,
                      "tools": tools}

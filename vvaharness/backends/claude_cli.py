@@ -199,12 +199,31 @@ def _parse_envelope(stdout: str) -> tuple[str, dict | None]:
 
 def _find_claude_cmd() -> list[str]:
     """
-    Resolve the claude CLI to a subprocess-safe command list.
+    Resolve the claude CLI to a subprocess-safe command list, pinned to an
+    ABSOLUTE path where possible (avoid bare-name PATH resolution at exec time
+    — CWE-426/427).
 
-    On Windows, the npm .cmd shim fails with "Access is denied" under
-    subprocess. Instead, we find the underlying cli.js and call Node directly.
-    On Unix, `claude` just works.
+    Resolution order (both platforms):
+      1. ``$VVAHARNESS_CLAUDE_BINARY`` if it points at an existing file — an
+         explicit operator pin that bypasses PATH entirely (the only thing that
+         defeats an already-poisoned PATH; recommended on shared/CI hosts).
+      2. ``shutil.which("claude")`` — the absolute path PATH resolves to,
+         pinned once at import so later model calls don't re-resolve a freshly
+         planted binary.
+      3. bare ``["claude"]`` as a last resort, with a warning, so the harness
+         still runs where neither is available.
+
+    On Windows the npm .cmd shim fails with "Access is denied" under subprocess,
+    so we drill to the underlying native binary / cli.js as before.
     """
+    override = os.environ.get("VVAHARNESS_CLAUDE_BINARY")
+    if override:
+        if Path(override).is_file():
+            print(f"  [cli] using VVAHARNESS_CLAUDE_BINARY={override}",
+                  file=sys.stderr)
+            return [override]
+        print(f"  [cli] WARN: VVAHARNESS_CLAUDE_BINARY={override} not found; "
+              f"falling back to PATH resolution", file=sys.stderr)
     if os.name == "nt":
         cmd_path = shutil.which("claude") or shutil.which("claude.cmd") or shutil.which("claude.CMD")
         if cmd_path:
@@ -221,17 +240,28 @@ def _find_claude_cmd() -> list[str]:
             # Last resort: the resolved .cmd shim (full path so CreateProcess
             # finds it). Bare "claude" fails with WinError 2 on Windows.
             return [cmd_path]
+        print("  [cli] WARN: 'claude' not found on PATH; using bare name",
+              file=sys.stderr)
         return ["claude"]
-    else:
-        return ["claude"]
+    # Unix: pin to the absolute path PATH resolves to, instead of a bare name.
+    resolved = shutil.which("claude")
+    if resolved:
+        return [resolved]
+    print("  [cli] WARN: 'claude' not found on PATH; using bare name",
+          file=sys.stderr)
+    return ["claude"]
 
 
 # Resolve once at import time
 _CLAUDE_CMD = _find_claude_cmd()
 
-# Permission-mode values we prefer for non-interactive scanning, in order. The
-# scan must never block on an approval prompt, so bypassPermissions is first.
-_PERMISSION_FALLBACKS = ("bypassPermissions", "acceptEdits", "default")
+# Permission-mode values we prefer for non-interactive scanning, in order.
+# acceptEdits auto-approves Read/Glob/Grep/Edit/Write (everything the shipped
+# profiles list) without granting blanket bypass — Bash is NOT auto-approved,
+# so a prompt-injected agent in a hostile target repo cannot escalate to a
+# host shell. bypassPermissions is deliberately last (a fallback only for CLI
+# builds that lack acceptEdits) and never the default.
+_PERMISSION_FALLBACKS = ("acceptEdits", "default", "bypassPermissions")
 
 _caps_cache: dict | None = None
 
@@ -254,14 +284,26 @@ def _cli_capabilities() -> dict:
         help_text = (r.stdout or "") + (r.stderr or "")
     except Exception:
         help_text = ""
-    modes = set(re.findall(r"\b(bypassPermissions|acceptEdits|default|plan|dontAsk|auto)\b",
-                          help_text))
+    # Parse permission modes ONLY from the --permission-mode option's own
+    # "(choices: ...)" list — never the whole help blob. A blanket scan
+    # false-matches stray words like "auto" in "auto-updater" / "automatic
+    # fallback", which made us believe an invalid `auto` mode was supported and
+    # pass it straight to a CLI that rejects it (choices are acceptEdits,
+    # bypassPermissions, default, plan). The CLI prints the option as:
+    #   --permission-mode <mode>  ... (choices: "acceptEdits", "default", ...)
+    modes: set[str] = set()
+    m = re.search(r"--permission-mode\b.*?\(choices:\s*([^)]*)\)",
+                  help_text, re.DOTALL)
+    if m:
+        modes = set(re.findall(r'"([^"]+)"', m.group(1)))
     _caps_cache = {
         "effort": "--effort" in help_text,
         "max_turns": "--max-turns" in help_text,
+        "max_budget": "--max-budget-usd" in help_text,
         "permission_modes": modes,
         "probed": bool(help_text),
     }
+
     return _caps_cache
 
 
@@ -447,7 +489,8 @@ def _run(cmd: list[str], *, input: str | None = None,
          cwd: str | None = None, timeout: int = 600,
          env: dict | None = None,
          heartbeat_label: str | None = None,
-         heartbeat_interval: int = 300) -> subprocess.CompletedProcess:
+         heartbeat_interval: int = 300,
+         stream_cb=None) -> subprocess.CompletedProcess:
     """Central subprocess runner with optional periodic progress heartbeat.
 
     The full process env (including ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN /
@@ -455,8 +498,17 @@ def _run(cmd: list[str], *, input: str | None = None,
     its native auth precedence (API key → auth token → OAuth on disk). Any
     TLS/proxy env vars registered via configure() (NODE_EXTRA_CA_CERTS,
     NODE_TLS_REJECT_UNAUTHORIZED, NO_PROXY) are layered on top of the ambient
-    env, and the per-call `env` argument wins over both."""
+    env, and the per-call `env` argument wins over both.
+
+    When ``stream_cb`` is provided, stdout is read line-by-line and each line is
+    passed to the callback AS IT ARRIVES (used by `--verbose` to surface the
+    live agent trace: tool calls, intermediate text). The full stdout is still
+    captured and returned, so all downstream parsing is unchanged."""
     proc_env = {**os.environ, **_tls_extra, **(env or {})}
+
+    if stream_cb is not None:
+        return _run_streaming(cmd, input=input, cwd=cwd, timeout=timeout,
+                              proc_env=proc_env, stream_cb=stream_cb)
 
     if not heartbeat_label:
         return subprocess.run(
@@ -523,6 +575,114 @@ def _run(cmd: list[str], *, input: str | None = None,
                 _LIVE.discard(proc)
 
         return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+
+def _run_streaming(cmd: list[str], *, input: str | None, cwd: str | None,
+                   timeout: int, proc_env: dict,
+                   stream_cb) -> subprocess.CompletedProcess:
+    """Run the CLI, forwarding each stdout line to *stream_cb* as it arrives,
+    while still capturing full stdout/stderr for the normal return contract.
+
+    Used for the `--verbose` live agent trace. A reader thread drains stdout so
+    a slow consumer never deadlocks the pipe; stderr is captured at the end."""
+    chunks: list[str] = []
+
+    def _reader(pipe):
+        for line in iter(pipe.readline, ""):
+            chunks.append(line)
+            try:
+                stream_cb(line)
+            except Exception:  # noqa: BLE001 — tracing must never break the run
+                pass
+        pipe.close()
+
+    with subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE if input is not None else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=cwd,
+        env=proc_env,
+        bufsize=1,  # line-buffered
+    ) as proc:
+        with _LIVE_LOCK:
+            _LIVE.add(proc)
+        reader = threading.Thread(target=_reader, args=(proc.stdout,), daemon=True)
+        reader.start()
+        try:
+            if input is not None:
+                try:
+                    proc.stdin.write(input)
+                    proc.stdin.close()
+                except BrokenPipeError:
+                    pass
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                reader.join(timeout=2)
+                err = proc.stderr.read() if proc.stderr else ""
+                raise subprocess.TimeoutExpired(
+                    cmd, timeout, output="".join(chunks), stderr=err)
+        except KeyboardInterrupt:
+            _ABORT.set()
+            _kill_tree(proc)
+            raise
+        finally:
+            with _LIVE_LOCK:
+                _LIVE.discard(proc)
+        reader.join(timeout=5)
+        err = proc.stderr.read() if proc.stderr else ""
+    return subprocess.CompletedProcess(cmd, proc.returncode, "".join(chunks), err)
+
+
+def stream_trace(line: str, *, out=None) -> None:
+    """Render one ``stream-json`` event line as a concise human trace for
+    `--verbose`: tool calls (name + key args), assistant text, and the final
+    result. Unknown / noisy event types are skipped. Best-effort and redacted —
+    never raises."""
+    out = out or sys.stderr
+    line = (line or "").strip()
+    if not line:
+        return
+    try:
+        evt = json.loads(line)
+    except (json.JSONDecodeError, TypeError):
+        return
+    etype = evt.get("type")
+    if etype == "assistant":
+        for blk in (evt.get("message", {}) or {}).get("content", []) or []:
+            if not isinstance(blk, dict):
+                continue
+            if blk.get("type") == "text" and blk.get("text", "").strip():
+                print(f"    [agent] 💬 {redact(blk['text'].strip())[:400]}",
+                      file=out, flush=True)
+            elif blk.get("type") == "tool_use":
+                name = blk.get("name", "?")
+                args = blk.get("input", {}) or {}
+                summ = ", ".join(f"{k}={v!r}" for k, v in args.items())
+                summ = redact(summ)
+                if len(summ) > 160:
+                    summ = summ[:157] + "..."
+                print(f"    [agent] 🔧 {name}({summ})", file=out, flush=True)
+    elif etype == "user":
+        # tool_result coming back to the model — show a short confirmation.
+        for blk in (evt.get("message", {}) or {}).get("content", []) or []:
+            if isinstance(blk, dict) and blk.get("type") == "tool_result":
+                content = blk.get("content")
+                if isinstance(content, list):
+                    content = " ".join(
+                        c.get("text", "") for c in content
+                        if isinstance(c, dict))
+                n = len(str(content or ""))
+                print(f"    [agent] ↩ tool result ({n} chars)", file=out, flush=True)
+    elif etype == "result":
+        if evt.get("is_error"):
+            print(f"    [agent] ✗ {redact(str(evt.get('result') or evt.get('error') or ''))[:200]}",
+                  file=out, flush=True)
 
 
 # ── transient-failure retry ──────────────────────────────────────────────────
@@ -688,10 +848,14 @@ def prompt(
     cmd += ["--output-format", "json"]
     if json_schema:
         cmd += ["--json-schema", json.dumps(json_schema)]
-    if max_budget_usd:
+    # Forward the spend cap only when the installed CLI advertises the flag.
+    # Older/newer CLIs that lack --max-budget-usd reject the unknown flag with
+    # rc=1; the timeout is the bound there. (Probe-gated like --effort / --max-turns.)
+    if max_budget_usd and _cli_capabilities().get("max_budget"):
         cmd += ["--max-budget-usd", str(max_budget_usd)]
 
     # Disable all tools — pure reasoning
+
     cmd += ["--tools", ""]
 
     # claude CLI reads max output tokens from env, not a flag.
@@ -743,11 +907,18 @@ def agentic(
                                    # gated); otherwise the CLI owns its loop and
                                    # --max-budget-usd / the timeout are the bounds.
     tag: str | None = None,
+    stream_cb=None,                # optional: called with each raw stream-json
+                                   # line as it arrives (live --verbose trace).
 ) -> str:
     """
     Agentic mode — Claude gets tools and explores the repo.
     Used for Step 1 where Opus needs to read files, grep, etc.
     Returns the final text output.
+
+    When ``stream_cb`` is supplied the CLI's ``stream-json`` events are streamed
+    to it live (see :func:`stream_trace`); otherwise output is buffered as
+    before. Streaming bypasses the periodic heartbeat (the live trace already
+    shows progress).
     """
     if _ABORT.is_set():
         raise RuntimeError("aborted by user (Ctrl-C)")
@@ -758,13 +929,19 @@ def agentic(
     if system_prompt:
         cmd += ["--system-prompt", system_prompt]
     if allowed_tools:
-        tools = list(allowed_tools)
-        if "Bash" not in tools:
-            tools.append("Bash")
-        cmd += ["--allowedTools"] + tools
-    if max_budget_usd:
+        # Honour the caller's allowlist as-given. Bash is NEVER force-added:
+        # a hostile target repo can prompt-inject the agent via files it
+        # Reads/Greps, and an auto-granted shell would turn that into RCE on
+        # the scanning host. Operators who need Bash must list it explicitly
+        # in step*.allowed_tools (and accept that risk).
+        cmd += ["--allowedTools"] + list(allowed_tools)
+    # Forward the spend cap only when the installed CLI advertises the flag —
+    # builds that lack --max-budget-usd reject the unknown flag with rc=1
+    # (the timeout / --max-turns bound the run there). Probe-gated like --effort.
+    if max_budget_usd and _cli_capabilities().get("max_budget"):
         cmd += ["--max-budget-usd", str(max_budget_usd)]
     # Cap the tool loop only when the installed CLI actually accepts the flag —
+
     # appending it unconditionally is a silent no-op on builds that lack it and
     # an error on builds that reject unknown flags.
     if max_turns and _cli_capabilities().get("max_turns"):
@@ -776,13 +953,18 @@ def agentic(
     tag_sfx = f" [{tag}]" if tag else ""
     print(f"    [cli] agentic mode -> {model}{tag_sfx}, cwd={cwd}", file=sys.stderr)
 
+    # When streaming the live trace, the per-line callback already shows
+    # progress, so the periodic heartbeat is suppressed (the streaming runner
+    # ignores it anyway).
     result = _run_with_retry(
         cmd,
         label=f"agentic({model}){tag_sfx}",
         input=user_prompt,
         cwd=cwd,
         timeout=3600,
-        heartbeat_label=f"agentic mode ({model}){tag_sfx}",
+        heartbeat_label=(None if stream_cb
+                         else f"agentic mode ({model}){tag_sfx}"),
+        stream_cb=stream_cb,
     )
 
     if result.returncode != 0:

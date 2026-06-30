@@ -23,6 +23,8 @@ import os
 import sys
 from pathlib import Path
 
+from vvaharness.validation.constants.artifacts import VALIDATE_COMMANDS
+
 
 def _doctor(rest: list[str]) -> int:
     """Read-only diagnostic. Renders the SAME static readiness checks as
@@ -90,6 +92,81 @@ def _estimate(rest: list[str]) -> int:
     print("  total token usage to be a multiple of the above. Cost depends on")
     print("  the model in config.yaml. Use --stop-after s3 for an exact scope.")
     return 0
+
+
+def _gc(rest: list[str]) -> int:
+    """Delete old run records from the SQLite state DB (``$VVAHARNESS_STATE_DIR/vvaharness.db``):
+    ``runs`` rows (and their checkpoints via ON DELETE CASCADE) older than --max-age-days or
+    outside the --keep-runs most recent. Reports/SARIF/manifest under ``<repo>/security-scan/``
+    are never touched."""
+    import argparse
+    from vvaharness.orchestrator.checkpoints import prune_checkpoints, run_id_for
+    ap = argparse.ArgumentParser(prog="vvaharness gc")
+    ap.add_argument("--keep-runs", type=int, default=100,
+                    help="retain the N most-recent run_ids (default: 100)")
+    ap.add_argument("--max-age-days", type=int, default=5,
+                    help="delete runs older than D days (default: 5)")
+    ap.add_argument("--run", metavar="PATH",
+                    help="fully evict the run for this repo PATH (its run_id is "
+                         "derived from the path) instead of age/count pruning")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="show what would be deleted; touch nothing")
+    a = ap.parse_args(rest)
+
+    # Targeted eviction: purge exactly the run for a given repo path. Useful
+    # before a clean rescan, or to drop a run without waiting for age/count GC.
+    if a.run:
+        from vvaharness.orchestrator import store
+        rid = run_id_for(a.run)
+        if a.dry_run:
+            print(f"  [dry-run] gc: would evict run {rid} for {a.run}")
+            return 0
+        ok = store.delete_run(rid)
+        print(f"  gc: {'evicted' if ok else 'no run found for'} {a.run} "
+              f"(run_id {rid})")
+        return 0
+
+    r = prune_checkpoints(keep_runs=a.keep_runs,
+                          max_age_days=a.max_age_days,
+                          dry_run=a.dry_run)
+    tag = "[dry-run] " if a.dry_run else ""
+    print(f"  gc: {r['root']}")
+    print(f"  {tag}kept {r['kept']} run(s), "
+          f"{'would delete' if a.dry_run else 'deleted'} {len(r['deleted'])}")
+    for rid in r["deleted"]:
+        print(f"    - {rid}")
+    return 0
+
+
+def _validate(rest: list[str]) -> int:
+    """Run the s11 agentic validation agent. Lazy import: requires the `validation` extra
+    (Claude Agent SDK). The subcommand owns its own --config / model resolution.
+    Invocable as `vvaharness validate …` or `vvaharness s11 …`."""
+    from vvaharness.validation.cli import main as validate_main
+    return validate_main(rest)
+
+
+def _remediate(rest: list[str]) -> int:
+    """Drive remediation from a prior scan's output. Reads the findings from
+    ``<repo>/security-scan/`` and walks them with the same per-stage CLI look
+    used by `scan`, running the configured ``models.remediate`` role per finding.
+    Honours ``--config`` (same resolution as scan/doctor). Delegates to remediation_agent."""
+    from vvaharness import config as config_mod
+    from vvaharness.orchestrator import configure_backends
+    from vvaharness.remediation_agent import remediate
+    repo = _repo_from(rest)
+    if not repo:
+        print("usage: vvaharness remediate --repo <path>", file=sys.stderr)
+        return 2
+    cfg_path = _config_path_from(rest)
+    if not Path(cfg_path).exists():
+        print(f"remediate: config not found: {cfg_path}", file=sys.stderr)
+        return 2
+    cfg = config_mod.load(cfg_path)
+    # Apply sdk/openai/cli TLS + key settings so the remediate role's backend
+    # is configured exactly as a scan would configure it.
+    configure_backends(cfg, Path(cfg_path).resolve().parent)
+    return remediate(repo, rest, cfg)
 
 
 def _config_path_from(rest: list[str]) -> str:
@@ -285,7 +362,10 @@ def _setup(rest: list[str]) -> int:
         print(f"\n  Not ready: fix the {n_blocking} blocking item(s) above, "
               f"then `vvaharness scan`.\n")
         return 1
-    print("\n  Ready ✓  →  vvaharness scan --repo /path/to/target\n")
+    print("\n  Ready ✓  →  vvaharness scan --repo /path/to/target")
+    print("  ⚠ the shipped default profile runs remediation in fix mode, so `scan` EDITS "
+          "source files in the target repo.")
+    print("    For detection only (no code changes): vvaharness scan --repo … --stop-after s9\n")
     return 0
 
 
@@ -299,17 +379,29 @@ Commands:
   setup      Guided readiness check: AI agents, keys, deps, gateway, config
   doctor     Check credentials + live backend connectivity (read-only)
   estimate   Print a rough scope/cost preview for a repo (no API spend)
+  gc         Delete old checkpoint runs (--keep-runs / --max-age-days / --dry-run)
   scan       Scan a repo (or --repo-file batch) for vulnerabilities
+             (⚠ default profile EDITS source files in fix mode — `--stop-after s9` = detection only)
+  remediate  Walk findings from a prior scan and remediate them (Remediation Agent)
+             (--interactive/-i to pick issues from a menu; --mode fix|report-only;
+              --top N overrides step_remediate.top_n_findings to remediate only
+              the N highest-CVSS findings (--top all / --top * remediates every one);
+              --verbose/-v to print the prompt + raw LLM response per finding)
+  validate   Run the s11 agentic validation agent on applied remediations
+  s11        Alias for `validate` — the s11 agentic validation stage
 
 Run 'vvaharness scan --help' for the full list of scan options.
+Run 'vvaharness validate --help' (or 'vvaharness s11 --help') for validation options.
 Config:
   vvaharness uses ./config.yaml when present; otherwise it uses the packaged default.
-  CLI default: cp vvaharness/config/profiles/cli.yaml config.yaml
+  Customise: cp vvaharness/config/profiles/sdk.yaml config.yaml   (all-SDK profile; see also full.yaml)
 Quick start:
   vvaharness setup
   vvaharness estimate --repo /path/to/target
-  vvaharness scan --repo /path/to/target --application-id 12345
+  vvaharness scan --repo /path/to/target --application-id 12345   # ⚠ edits source by default (S10 fix mode)
+  vvaharness scan --repo /path/to/target --stop-after s9          # detection only — no code changes
 """)
+
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -334,6 +426,12 @@ def main(argv: list[str] | None = None) -> int:
             return _doctor(args[1:])
         if cmd == "estimate":
             return _estimate(args[1:])
+        if cmd == "gc":
+            return _gc(args[1:])
+        if cmd == "remediate":
+            return _remediate(args[1:])
+        if cmd in VALIDATE_COMMANDS:
+            return _validate(args[1:])
         if cmd == "scan":
             args = args[1:]
 

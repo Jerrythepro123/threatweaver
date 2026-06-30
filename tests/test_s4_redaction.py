@@ -61,3 +61,59 @@ def test_invalid_ssn_left_untouched():
     # area 666 is not a valid SSN -> must not be masked (precision).
     src = "ref = '666-05-1120'\n"
     assert _redact_source(src, "x.py") == src
+
+
+def test_masks_non_standard_prefix_card_like():
+    # Gap closure (CWE-201): a 16-digit card-like run with a NON-3/4/5/6 prefix
+    # that also fails the IIN/Luhn gates would slip past BOTH masking layers and
+    # egress to the LLM provider. The `card` keyword immediately before the run
+    # triggers the Layer-1 context gate, keeping the first 4 digits + length so
+    # a researcher can still flag it.
+    src = "card = '1234567890123456'\n"
+    out = _redact_source(src, "x.py")
+    assert "1234567890123456" not in out
+    assert "1234XXXXXXXXXXXX" in out          # first-4 kept, remaining 12 masked
+
+
+def test_masks_non_standard_prefix_with_separators():
+    # Same gap, with separators + a '9' prefix; the `pan` keyword triggers the
+    # context gate and layout is preserved.
+    src = "pan = '9999-8888-7777-6666'\n"
+    out = _redact_source(src, "x.py")
+    assert "9999-8888-7777-6666" not in out
+    assert "9999-XXXX-XXXX-XXXX" in out
+
+
+def test_masks_luhn_valid_odd_prefix_without_keyword():
+    # Luhn gate: a real card-shaped value (Mastercard 2-series, prefix '2', NOT
+    # 3/4/5/6) with NO card keyword nearby is still masked because it satisfies
+    # the Luhn check digit — every issued PAN does, regardless of IIN.
+    src = "x = '2223003122003222'\n"          # Luhn-valid MC 2-series test PAN
+    out = _redact_source(src, "x.py")
+    assert "2223003122003222" not in out
+    assert "2223XXXXXXXXXXXX" in out
+
+
+def test_contextless_non_card_digit_run_left_untouched():
+    # Precision (the fix): a 13-19 digit literal that is neither Luhn-valid nor
+    # labelled with a card keyword — e.g. a nanosecond epoch timestamp or a
+    # Snowflake/DB id — must NOT be masked. A length-only gate mangled these,
+    # corrupting the literal the researcher reasons about for no privacy gain.
+    src = "timestamp_ns = 1700000000000000000\nsnowflake_id = 1234567890123456789\n"
+    assert _redact_source(src, "x.py") == src
+
+
+def test_standard_pan_render_unchanged():
+    # Regression: a standard 4-prefix PAN is masked exactly as before
+    # (first 4 kept, rest X). The widened gate is a strict superset — it must
+    # not change how already-covered PANs render.
+    out = _redact_source("PAN = '4111111111111111'\n", "x.py")
+    assert "4111111111111111" not in out
+    assert "4111XXXXXXXXXXXX" in out
+
+
+def test_short_digit_run_left_untouched():
+    # Precision: < 13 digits is not card-like and must NOT be masked
+    # (e.g. ports, versions, small ids, 12-digit values).
+    src = "port = 8080\nid = 123456789012\n"   # 4-digit and 12-digit runs
+    assert _redact_source(src, "x.py") == src

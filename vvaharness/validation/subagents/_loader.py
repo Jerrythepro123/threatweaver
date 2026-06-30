@@ -1,0 +1,113 @@
+# Copyright 2026 Visa, Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Load subagent definitions from bundled .md authoring files."""
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Iterator
+from dataclasses import replace
+from importlib.resources import files
+from pathlib import Path
+
+from vvaharness.validation.backends.contract.subagents import SubagentDefinition
+from vvaharness.validation.subagents._frontmatter import (
+    SubagentFrontmatterMeta,
+    parse_frontmatter,
+)
+
+FIX_PATH_AGENTS: tuple[str, ...] = (
+    "security-architect",
+    "penetration-tester",
+    "cross-repo-analyzer",
+)
+
+
+def _build_subagent_definition(
+    meta: SubagentFrontmatterMeta,
+    prompt: str,
+) -> SubagentDefinition:
+    """Build a SubagentDefinition from parsed frontmatter and body prompt."""
+    name = meta.get("name")
+    if not isinstance(name, str) or not name:
+        raise ValueError("subagent frontmatter missing 'name'")
+    description = meta.get("description")
+    if not isinstance(description, str) or not description:
+        raise ValueError(f"subagent {name!r} missing 'description'")
+    model = meta.get("model")
+    tools_raw = meta.get("allowedTools")
+    disallowed_raw = meta.get("deniedTools")
+    skills_raw = meta.get("skills")
+    return SubagentDefinition(
+        name=name,
+        description=description,
+        prompt=prompt,
+        tools=tuple(tools_raw) if isinstance(tools_raw, list) and tools_raw else None,
+        disallowed_tools=(
+            tuple(disallowed_raw)
+            if isinstance(disallowed_raw, list) and disallowed_raw
+            else None
+        ),
+        model=model if isinstance(model, str) else None,
+        skills=tuple(skills_raw) if isinstance(skills_raw, list) and skills_raw else None,
+    )
+
+
+def _iter_bundled_files() -> Iterator[Path]:
+    """Yield Path objects for each bundled .md subagent file."""
+    pkg_root = files("vvaharness.validation.subagents")
+    for entry in pkg_root.iterdir():
+        if entry.name.endswith(".md"):
+            yield Path(str(entry))
+
+
+def load_agents(
+    names: Iterable[str] | None = None,
+    model_overrides: dict[str, str] | None = None,
+    tools_override: tuple[str, ...] | None = None,
+) -> dict[str, SubagentDefinition]:
+    """Load subagent definitions from bundled .md files, filtered to names if given.
+
+    ``model_overrides`` maps a persona name to a model id; a matching persona's ``model``
+    is replaced with it. A persona absent from the map keeps its frontmatter ``model``
+    (``None`` → inherits the parent session's model).
+
+    ``tools_override`` (when given) replaces every persona's tool allow-list; ``None`` keeps
+    the frontmatter ``allowedTools``.
+    """
+    wanted: set[str] | None = set(names) if names is not None else None
+    overrides = model_overrides or {}
+    result: dict[str, SubagentDefinition] = {}
+    for path in _iter_bundled_files():
+        text = path.read_text(encoding="utf-8")
+        meta, prompt = parse_frontmatter(text)
+        subagent = _build_subagent_definition(meta, prompt)
+        if wanted is not None and subagent.name not in wanted:
+            continue
+        if subagent.name in overrides:
+            subagent = replace(subagent, model=overrides[subagent.name])
+        if tools_override is not None:
+            subagent = replace(subagent, tools=tools_override)
+        result[subagent.name] = subagent
+    _assert_all_found(wanted, set(result.keys()))
+    return result
+
+
+def _assert_all_found(wanted: set[str] | None, found: set[str]) -> None:
+    """Raise if any explicitly-requested subagent name was not loaded."""
+    if wanted is None:
+        return
+    missing = wanted - found
+    if missing:
+        raise ValueError(f"requested subagents not found: {sorted(missing)}")

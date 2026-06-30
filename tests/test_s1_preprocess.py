@@ -136,6 +136,45 @@ def test_norm_rel_empty():
     assert s1._norm_rel("repo", "") == ""
 
 
+# ─── _resolve_scope_path (collision-aware in-scope resolution) ──────────────
+# repo_root="app" with two repos sharing src/config.py; only repo-a has util.py.
+_KEEP = {"repo-a/src/config.py", "repo-b/src/config.py", "repo-a/src/util.py"}
+_TOPS = ["repo-a", "repo-b"]
+
+
+def test_resolve_exact_prefixed_hit():
+    # A correctly-qualified path resolves directly, never touching the fallback.
+    assert s1._resolve_scope_path("repo-b/src/config.py", "app", _KEEP, _TOPS) \
+        == ("repo-b/src/config.py", False)
+
+
+def test_resolve_unprefixed_unique_match():
+    # Exists under exactly ONE top dir -> resolved, not ambiguous.
+    assert s1._resolve_scope_path("src/util.py", "app", _KEEP, _TOPS) \
+        == ("repo-a/src/util.py", False)
+
+
+def test_resolve_unprefixed_ambiguous_is_dropped_not_guessed():
+    # Exists under BOTH repos -> must NOT bind to the alphabetically-first repo.
+    hit, amb = s1._resolve_scope_path("src/config.py", "app", _KEEP, _TOPS)
+    assert hit is None and amb is True
+    assert hit != "repo-a/src/config.py"     # the old silent-first-match bug
+
+
+def test_resolve_no_match():
+    assert s1._resolve_scope_path("src/missing.py", "app", _KEEP, _TOPS) \
+        == (None, False)
+
+
+def test_resolve_single_repo_top_dir_ambiguity():
+    # Same defect/fix in single-repo mode: bare name under src/ AND lib/.
+    keep = {"src/config.py", "lib/config.py", "src/only.py"}
+    tops = ["lib", "src"]
+    assert s1._resolve_scope_path("config.py", "repo", keep, tops) == (None, True)
+    assert s1._resolve_scope_path("only.py", "repo", keep, tops) \
+        == ("src/only.py", False)
+
+
 # ─── _flatten_keys ────────────────────────────────────────────────────────
 def test_flatten_keys_nested_dict():
     obj = {"a": {"b": 1, "c": 2}, "d": 3}
@@ -344,14 +383,44 @@ def test_walk_repo_drops_offroot_symlink_keeps_intree(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
-    Path(repo / "link_in.py").symlink_to(repo / "a.py")     # in-tree → keep
-    Path(repo / "link_out.txt").symlink_to(secret)          # off-root → drop
+    try:
+        Path(repo / "link_in.py").symlink_to(repo / "a.py")     # in-tree → keep
+        Path(repo / "link_out.txt").symlink_to(secret)          # off-root → drop
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
 
     out, excluded = s1._walk_repo(str(repo), _cfg(_step1(max_file_kb=1024)))
 
     assert "a.py" in out
     assert "link_in.py" in out                 # in-tree symlink preserved
     assert "link_out.txt" not in out           # off-root symlink not scanned
+    assert "link_out.txt" in (excluded.get("symlinks") or {})   # and audited
+
+
+def test_walk_repo_offroot_symlink_dropped_even_with_follow_symlinks_true(tmp_path):
+    """The off-root containment guard is UNCONDITIONAL: setting
+    step1.follow_symlinks: true (e.g. via a shared/CI config) must NOT re-open
+    host-file reads through a committed off-repo symlink. In-tree links are still
+    followed. Regression guard for the disclosure path."""
+    from pathlib import Path
+    secret = tmp_path / "secret.txt"           # lives OUTSIDE the repo
+    secret.write_text("host-only data", encoding="utf-8")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    try:
+        Path(repo / "link_in.py").symlink_to(repo / "a.py")     # in-tree → keep
+        Path(repo / "link_out.txt").symlink_to(secret)          # off-root → drop
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted on this platform")
+
+    out, excluded = s1._walk_repo(
+        str(repo), _cfg(_step1(max_file_kb=1024, follow_symlinks=True)))
+
+    assert "a.py" in out
+    assert "link_in.py" in out                 # in-tree symlink still followed
+    assert "link_out.txt" not in out           # off-root STILL dropped despite flag
     assert "link_out.txt" in (excluded.get("symlinks") or {})   # and audited
 
 

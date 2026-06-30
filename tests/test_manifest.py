@@ -87,7 +87,10 @@ def test_capture_yields_expected_fields(tmp_path, frozen_time, no_git, no_models
     with manifest.capture(cfg, args, out=out) as m:
         # Inside the block: the seed fields should already be populated.
         assert m["tool"] == "vvaharness"
-        assert m["version"] == "1.0.0"
+        # Version is sourced from package metadata (single source of truth), so
+        # assert against the live value rather than a literal that can drift.
+        from vvaharness import __version__ as _vvah_version
+        assert m["version"] == _vvah_version
         assert m["argv"] == args
         assert m["config_profile"] == str(cfg)
         assert m["models"] == {}
@@ -225,6 +228,67 @@ def test_config_sha256_matches_hashlib(tmp_path):
     assert manifest._config_sha256(cfg) == expected
 
 
+# ---------------------------------------------------------------------------
+# _scrub_argv  (secret redaction before argv lands in run_manifest.json)
+# ---------------------------------------------------------------------------
+
+def test_scrub_argv_redacts_flag_value_space_form():
+    """`--git-token VALUE` (value in the next token) must be masked to ***."""
+    out = manifest._scrub_argv(["scan", "--git-token", "ghp_" + "B" * 36])
+    assert out == ["scan", "--git-token", "***"]
+
+
+def test_scrub_argv_redacts_inline_equals_form():
+    """`--anthropic-api-key=VALUE` (inline =VALUE) must be masked to flag=***."""
+    out = manifest._scrub_argv(["scan", "--anthropic-api-key=sk-secret123456"])
+    assert out == ["scan", "--anthropic-api-key=***"]
+
+
+def test_scrub_argv_preserves_non_secret_keep_clones_decoy():
+    """`key` alone must NOT trigger redaction — `--keep-clones` is preserved
+    (guards the _SECRET_FLAG_RX bare-`key` exclusion against regression)."""
+    out = manifest._scrub_argv(["scan", "--keep-clones", "--repo", "/x"])
+    assert out == ["scan", "--keep-clones", "--repo", "/x"]
+
+
+def test_scrub_argv_masks_secret_shaped_value_regardless_of_flag():
+    """Second (shape) pass: an inline-credential URL passed as any argument is
+    scrubbed even though `--repo` is not a secret-named flag."""
+    url = "https://user:hunter2pw@host/r"
+    out = manifest._scrub_argv(["scan", "--repo", url])
+    assert "hunter2pw" not in " ".join(out)
+    # Scheme + username preserved; only the password component is masked.
+    assert out[2].startswith("https://user:") and out[2].endswith("@host/r")
+
+
+def test_scrub_argv_leaves_ordinary_args_unchanged():
+    """No secrets present -> argv passes through verbatim (no false positives)."""
+    args = ["scan", "--repo", "/path/to/repo", "--config", "profile.yaml"]
+    assert manifest._scrub_argv(args) == args
+
+
+def test_capture_persisted_argv_contains_no_secrets(tmp_path, frozen_time,
+                                                    no_git, no_models):
+    """End-to-end regression guard for the run_manifest secret-persistence
+    finding: secrets in argv must not survive into the on-disk manifest."""
+    cfg = tmp_path / "profile.yaml"
+    cfg.write_text("x", encoding="utf-8")
+    out = tmp_path / "m.json"
+    secret_flag = "ghp_" + "C" * 36
+    args = ["scan", "--repo", "https://u:topsecretpw@h/r",
+            "--git-token", secret_flag, "--anthropic-api-key=sk-live-987654321"]
+
+    with manifest.capture(cfg, args, out=out) as m:
+        m["exit_code"] = 0
+
+    raw = out.read_text(encoding="utf-8")
+    assert secret_flag not in raw
+    assert "topsecretpw" not in raw
+    assert "sk-live-987654321" not in raw
+    # Structure is otherwise intact.
+    assert m["argv"][0] == "scan" and "--repo" in m["argv"]
+
+
 def test_capture_includes_real_config_sha(tmp_path, frozen_time, no_git, no_models):
     import hashlib
     cfg = tmp_path / "profile.yaml"
@@ -251,47 +315,81 @@ def test_git_sha_none_without_repo_arg():
     assert manifest._git_sha(["scan", "--verbose"]) is None
 
 
-def test_git_sha_space_separated_repo(monkeypatch):
+def test_git_sha_space_separated_repo(tmp_path, monkeypatch):
     captured = {}
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, **kw):
         captured["cmd"] = cmd
+        captured["cwd"] = kw.get("cwd")
         return types.SimpleNamespace(stdout="deadbeef\n", returncode=0)
 
     monkeypatch.setattr(manifest.subprocess, "run", fake_run)
-    sha = manifest._git_sha(["scan", "--repo", "/path/to/repo"])
+    sha = manifest._git_sha(["scan", "--repo", str(tmp_path)])
     assert sha == "deadbeef"
-    assert captured["cmd"] == ["git", "-C", "/path/to/repo", "rev-parse", "HEAD"]
+    # Hardened form: no `-C`; the repo is passed as cwd (resolved), so the value
+    # is never in git's option position.
+    assert captured["cmd"] == ["git", "rev-parse", "HEAD"]
+    assert captured["cwd"] == str(tmp_path.resolve())
 
 
-def test_git_sha_equals_form_repo(monkeypatch):
+def test_git_sha_equals_form_repo(tmp_path, monkeypatch):
     captured = {}
 
-    def fake_run(cmd, capture_output, text, timeout):
+    def fake_run(cmd, **kw):
         captured["cmd"] = cmd
+        captured["cwd"] = kw.get("cwd")
         return types.SimpleNamespace(stdout="abc123\n", returncode=0)
 
     monkeypatch.setattr(manifest.subprocess, "run", fake_run)
-    sha = manifest._git_sha(["scan", "--repo=/other/repo"])
+    sha = manifest._git_sha([f"--repo={tmp_path}"])
     assert sha == "abc123"
-    assert captured["cmd"][3] == "rev-parse"
-    assert "/other/repo" in captured["cmd"]
+    assert captured["cmd"] == ["git", "rev-parse", "HEAD"]
+    assert captured["cwd"] == str(tmp_path.resolve())
 
 
-def test_git_sha_empty_output_returns_none(monkeypatch):
+def test_git_sha_empty_output_returns_none(tmp_path, monkeypatch):
     monkeypatch.setattr(
         manifest.subprocess, "run",
         lambda *a, **k: types.SimpleNamespace(stdout="   \n", returncode=0),
     )
-    assert manifest._git_sha(["--repo", "/r"]) is None
+    assert manifest._git_sha(["--repo", str(tmp_path)]) is None
 
 
-def test_git_sha_subprocess_exception_returns_none(monkeypatch):
+def test_git_sha_subprocess_exception_returns_none(tmp_path, monkeypatch):
     def boom(*a, **k):
         raise OSError("git not found")
 
     monkeypatch.setattr(manifest.subprocess, "run", boom)
-    assert manifest._git_sha(["--repo", "/r"]) is None
+    assert manifest._git_sha(["--repo", str(tmp_path)]) is None
+
+
+# ── hardening: --repo is validated as a real directory BEFORE git is spawned ────
+def test_git_sha_nonexistent_repo_returns_none_without_spawning(tmp_path, monkeypatch):
+    spawned = {"called": False}
+
+    def fake_run(*a, **k):
+        spawned["called"] = True
+        return types.SimpleNamespace(stdout="x\n", returncode=0)
+
+    monkeypatch.setattr(manifest.subprocess, "run", fake_run)
+    missing = tmp_path / "does-not-exist"
+    assert manifest._git_sha(["--repo", str(missing)]) is None
+    assert spawned["called"] is False        # rejected before any git spawn
+
+
+def test_git_sha_leading_dash_repo_returns_none_without_spawning(monkeypatch):
+    # The reported option-injection payload: a leading-dash --repo value. It is
+    # not a real directory, so it is rejected before git is ever invoked (and it
+    # would be passed via cwd, never as a git option, even if it existed).
+    spawned = {"called": False}
+
+    def fake_run(*a, **k):
+        spawned["called"] = True
+        return types.SimpleNamespace(stdout="x\n", returncode=0)
+
+    monkeypatch.setattr(manifest.subprocess, "run", fake_run)
+    assert manifest._git_sha(["--repo", "--git-dir=/tmp/evil/.git"]) is None
+    assert spawned["called"] is False
 
 
 def test_capture_uses_git_sha(tmp_path, frozen_time, no_models, monkeypatch):
@@ -302,7 +400,7 @@ def test_capture_uses_git_sha(tmp_path, frozen_time, no_models, monkeypatch):
         manifest.subprocess, "run",
         lambda *a, **k: types.SimpleNamespace(stdout="feedface\n", returncode=0),
     )
-    with manifest.capture(cfg, ["scan", "--repo", "/r"], out=out) as m:
+    with manifest.capture(cfg, ["scan", "--repo", str(tmp_path)], out=out) as m:
         assert m["target_git_sha"] == "feedface"
 
 

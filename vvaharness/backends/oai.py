@@ -189,8 +189,19 @@ def _get_client():
             verify = ca or _cfg["verify_ssl"]
             if verify is not True:
                 if verify is False:
+                    # TLS verification is OFF. Suppress urllib3's per-request
+                    # InsecureRequestWarning spam, but NEVER do so silently:
+                    # emit one loud, unmissable warning naming the endpoint so
+                    # an operator can't disable cert/hostname checks unknowingly
+                    # (mirrors backends/claude_cli.py). ca_cert is the secure
+                    # way to trust a private-CA gateway.
                     import warnings, urllib3
                     warnings.simplefilter("ignore", urllib3.exceptions.InsecureRequestWarning)
+                    print(f"WARN [openai]: TLS verification DISABLED (verify_ssl=false) "
+                          f"for base_url={kw['base_url']} — prompts, source snippets, "
+                          f"outputs and the auth header are interceptable by an active "
+                          f"MITM. Set openai.ca_cert to a CA bundle to verify a "
+                          f"private-CA gateway instead.", file=sys.stderr)
                 kw["http_client"] = openai.DefaultHttpxClient(verify=verify)
             _client = openai.OpenAI(**kw)
     return _client

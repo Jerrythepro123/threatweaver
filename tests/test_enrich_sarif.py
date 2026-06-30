@@ -388,6 +388,30 @@ def test_md_to_sarif_parses_and_emits(tmp_path, capsys):
     assert res["rank"] == pytest.approx(fnd.cvss_score * 10.0, abs=0.05)
 
 
+def test_sarif_backfills_cwe_from_category_when_token_absent(tmp_path):
+    # No CWE token, but category=use-after-free → deterministic CWE-416 in
+    # props.cweId, result.taxa, and the run-level CWE taxonomy.
+    f = Finding(severity="HIGH", title="UAF", file="a.py", line_no=5,
+                category="use-after-free", cvss_score=7.0)
+    doc = _write_sarif(tmp_path, [f])
+    res = _only_result(doc)
+    assert res["properties"]["cweId"] == "CWE-416"
+    assert res["taxa"][0]["id"] == "CWE-416"
+    tax_ids = {t["id"] for t in doc["runs"][0]["taxonomies"][0]["taxa"]}
+    assert "CWE-416" in tax_ids
+
+
+def test_sarif_other_category_emits_no_cwe(tmp_path):
+    # category=other maps to no CWE → no cweId, no taxa, no taxonomy entries.
+    f = Finding(severity="LOW", title="misc", file="a.py", line_no=1,
+                category="other", cvss_score=2.0)
+    doc = _write_sarif(tmp_path, [f])
+    res = _only_result(doc)
+    assert "cweId" not in res["properties"]
+    assert "taxa" not in res
+    assert doc["runs"][0]["taxonomies"][0]["taxa"] == []
+
+
 def test_md_to_sarif_schema_and_version(tmp_path):
     md = tmp_path / "r.md"
     md.write_text("## [LOW] nothing\n`x.py:1` · misc · confidence 0.5\n",

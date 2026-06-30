@@ -751,6 +751,7 @@ class ScanMetrics(BaseModel):
 class FinalReport(BaseModel):
     repo_root: str
     repo_name: str | None = None     # repository_name from repos.txt/csv — used for the report title
+    git_sha: str | None = None       # B9: HEAD at scan time; step 10 refuses on mismatch
     findings: list[RankedFinding]
     chains: list[Chain]
     dropped: list[DroppedFinding] = []
@@ -805,15 +806,18 @@ class FinalReport(BaseModel):
                 cvss = f"`{f.cvss_vector}`"
             else:
                 cvss = "_not computed_"
-            from vvaharness.report.cwe import cwe_name
-            _nm = cwe_name(f.cwe) if f.cwe else ""
-            _cwe_label = (f"{f.cwe}: {_nm}" if _nm else f.cwe) if f.cwe else ""
+            from vvaharness.report.cwe import cwe_name, cwe_for
+            # Resolve a deterministic CWE: the finding's own token if present,
+            # else the VulnClass→CWE fallback (None for unclassified "other").
+            _cwe = cwe_for(f.cwe, f.vuln_class)
+            _nm = cwe_name(_cwe) if _cwe else ""
+            _cwe_label = (f"{_cwe}: {_nm}" if _nm else _cwe) if _cwe else ""
             out.extend([
                 f"### {i}. [{rf.severity.value.upper()}] {_md_cell(f.title)}",
                 f"**Class:** {_cwe_label or f.vuln_class.value}",
             ])
-            if f.cwe:
-                _n = f.cwe.split('-')[-1]
+            if _cwe:
+                _n = _cwe.split('-')[-1]
                 out.append(
                     f"**CWE:** {_cwe_label} - "
                     f"https://cwe.mitre.org/data/definitions/{_n}.html")
@@ -942,10 +946,14 @@ class FinalReport(BaseModel):
                 ("PII", ap.pii)) if ok) or "standard"
             out.extend([
                 "### Application profile (CMDB)",
-                f"- ID: `{ap.application_id}`  ({ap.name or '-'})",
+                # application_id (--application-id) / name / source are operator/CMDB
+                # supplied, not tool-derived; escape them so a value with a newline or
+                # `|` can't terminate this list/heading and inject Markdown into the
+                # report (same neutralisation the rest of this renderer already uses).
+                f"- ID: `{_md_cell(ap.application_id)}`  ({_md_cell(ap.name) or '-'})",
                 f"- Externally facing: **{'YES' if ap.externally_facing else 'NO'}**",
                 f"- Data sensitivity: {sens}",
-                f"- Source: {ap.source}",
+                f"- Source: {_md_cell(ap.source)}",
                 "",
             ])
         if tm.system_context:
