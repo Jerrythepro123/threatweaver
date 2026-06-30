@@ -19,7 +19,8 @@ limitations under the License.
 Agentic SAST pipeline. It surveys a code repo, threat-models it, decomposes it
 into analysis chunks, deep-dives each, adversarially verifies findings,
 deduplicates, analyses exploit chains, and emits a Markdown report + SARIF
-2.1.0.
+2.1.0. A separate `validate` command verifies remediations with an agentic
+adversarial panel.
 
 > **Read this first:** findings are **LLM-generated triage candidates, not
 > confirmed vulnerabilities.** Human review is required. Runs are
@@ -72,17 +73,22 @@ config profiles.
 
 ## 1. Commands
 
-`vvaharness` exposes four subcommands (a bare invocation prints help):
+`vvaharness` exposes these subcommands (a bare invocation prints help):
 
 | Command | Purpose |
 |---|---|
 | `vvaharness scan …` | Run the full pipeline against one repo or a batch. |
-| `vvaharness setup [--install-agents] [--write-env]` | Readiness wizard; `--install-agents` drops agent instructions (AGENTS.md / CLAUDE.md + skill / copilot / GEMINI.md) for your installed AI agent; `--write-env` scaffolds `.env`. |
+| `vvaharness remediate --repo <path>` | Walk a prior scan's findings and propose a minimal fix per finding (Remediation Agent, s10). Writes DTOs under `<repo>/security-remediation/`. See [§2b](#2b-remediate--propose-fixes). |
+| `vvaharness validate --repo <path>` | Verify remediation DTOs with an agentic adversarial panel (s10 discover + s11). Uses the bundled Claude Agent SDK. (Alias: `s11`.) |
+| `vvaharness setup [--install-agents] [--write-env]` | Readiness wizard; `--install-agents` drops agent instructions (AGENTS.md / CLAUDE.md + skill / copilot / GEMINI.md) for your installed AI agent; `--write-env` scaffolds `.env`. (Alias: `init`.) |
 | `vvaharness doctor [--config <file>]` | Report credential/backend readiness and run a live connectivity probe against the models the config will actually use. |
 | `vvaharness estimate --repo <path>` | Print a rough scope/cost preview (file count, bytes, ~input tokens). Spends nothing. |
+| `vvaharness gc [--keep-runs N] [--max-age-days N] [--run <path>] [--dry-run]` | Prune old checkpoint runs from the SQLite state DB (defaults: keep 100 runs / 5 days). `--run <path>` instead fully evicts the single run for that repo path (its `run_id` is path-derived). |
 
-`.env` in the working directory is loaded automatically (variables you export
-yourself take precedence), so no manual `source` step is required.
+A `.env` found from the current directory upward (the first match in the cwd or
+any ancestor) is loaded automatically (variables you export yourself take
+precedence), so no manual `source` step is required. The file actually loaded is
+printed as a `[env] loaded …` line.
 
 ---
 
@@ -98,11 +104,15 @@ yourself take precedence), so no manual `source` step is required.
 | `--workspace <dir>` | Where remote repos are cloned in batch mode. Default `./batch-workspace`. |
 | `--group-by-app` | Batch mode: clone every repo sharing an AppId under `<workspace>/<AppId>/` and run **one** scan over that directory (one report per application instead of one per repo). |
 | `--keep-clones` | Don't delete cloned repos after scanning (batch mode). |
-| `--resume` | Reuse on-disk checkpoints (`<target>/checkpoints/*.pkl`) instead of re-running completed stages. |
-| `--stop-after <step>` | Stop after `clone`/`s1`/…/`s9` (debugging). `clone` stops right after acquiring repos in batch mode and implies `--keep-clones`. |
+| `--resume` | Reuse on-disk checkpoints (SQLite state DB at `$VVAHARNESS_STATE_DIR/vvaharness.db`, default `~/.vvaharness/state/…`) instead of re-running completed stages. **Assumes the source is unchanged since the checkpointed run** — vvaharness does not detect code edits here. If the target changed, omit `--resume` (a fresh scan is clean) or run `vvaharness gc --run <path>` first to evict stale state. |
+| `--stop-after <step>` | Stop after `clone`/`s1`/…/`s11` (debugging). `clone` stops right after acquiring repos in batch mode and implies `--keep-clones`. |
+| `--remediate` | Run the Remediation Agent (s10) after the scan, proposing a minimal fix per verified finding under `<repo>/security-remediation/`. ORs with `step_remediate.enabled` (on by default). See [§2b](#2b-remediate--propose-fixes). |
+| `--top <N\|all\|*>` | With `--remediate`: remediate only the N highest-CVSS findings (overrides `step_remediate.top_n_findings`; `all`/`*` remediates every finding). |
+| `--force` | Override safety refusals (currently the s10 git-SHA staleness check that guards remediating against a moved checkout). |
 | `--skip-preflight` | Skip the startup credential/backend readiness probe. Does **not** bypass model/API authentication. |
 | `--step1-config <file>` | Apply an explicit Step-1 overlay YAML (exclude_dirs/exts/globs, max_file_kb, config_dedup). Lists **append** to the config's `step1`. Mutually exclusive with `--auto-step1` (this wins). |
-| `--auto-step1` | After clone, AI-survey each target to derive its Step-1 overlay; writes `<target>/checkpoints/step1.yaml` and applies it before s1. Ignored when `--step1-config` is given. Reused on `--resume`. |
+| `--auto-step1` | After clone, AI-survey each target to derive its Step-1 overlay; writes `$VVAHARNESS_STATE_DIR/checkpoints/<run_id>/step1.yaml` and applies it before s1. Ignored when `--step1-config` is given. Reused on `--resume`. **Also enabled via `step1.auto_exclude` in config — on by default in the shipped `default` profile** (flag and config OR together, like `--remediate`/`step_remediate.enabled`). To opt a run out, use a profile with `step1.auto_exclude: false`. |
+| `--no-auto-step1` | Hard-disable AI auto-exclude for this run, **irrespective of `step1.auto_exclude` in the default/sdk/full profile**. Wins over `--auto-step1` and any config default (mutually exclusive with `--auto-step1`). Use this to say "no" from the command line without editing a profile. |
 
 ### Examples
 
@@ -116,6 +126,83 @@ vvaharness scan --repo /path/to/target --application-id 12345
 # Batch — clone + scan many repos, one report per AppId
 vvaharness scan --repo-file repos.csv --workspace ./scans --group-by-app --keep-clones
 ```
+
+---
+
+## 2a. `validate` — verify remediations
+
+`vvaharness validate` scores remediations produced by the `remediate` command.
+With the shipped `default` profile it runs **automatically as Step 11 of `scan`**;
+it is also a standalone command you can run on its own. It discovers each finding's DTO under
+`<repo>/security-remediation/<NN_slug>/remediate_report.json` (s10 — discovery
+only, no model spend) and runs an agentic adversarial panel (s11) that fills the
+DTO's `validation` block and sets `status` to `validated` (fix passed),
+`validation_failed` (fix did not pass; re-validatable), or `needs_review` (no
+verdict produced). Re-runs are idempotent: only `validated` DTOs are skipped;
+`validation_failed` and `needs_review` stay re-validatable, so a corrected patch
+is re-driven on the next run with no manual DTO edit.
+
+```bash
+# Claude Agent SDK ships with vvaharness (Python >=3.10) — no extra install needed
+vvaharness validate --repo /path/to/target
+```
+
+| Flag | Effect |
+|---|---|
+| `--repo <path>` | Target repo whose `security-remediation/` DTOs are validated. **Required.** |
+| `--config <file>` | Config profile path; else `./config.yaml` if present, else the packaged `default.yaml`. |
+| `--finding <id>` | Validate this finding id (repeatable); these exact ids only, no cap. |
+| `--all` | Validate every awaiting finding (bypasses the `max_findings` cap). |
+| `--max-findings <n>` | Cap to the top-N awaiting findings by CVSS (overrides `step_validate.max_findings`). |
+| `--workspace <path>` | Staging root for per-finding copies. **Ephemeral** — removed on completion; a non-empty path is refused. Default `<repo>/security-remediation/validation`. |
+| `--resume` | Skip findings already validated in a prior run (cached verdict reprinted). |
+| `--scan-report <file>` | Combined report (`.md`) to enrich with validation results; defaults to the newest report under `<repo>/security-remediation/`. |
+
+The panel uses Claude Agent SDK subagents (`security-architect` +
+`penetration-tester`, plus a conditional `cross-repo-analyzer`) and scores each
+fix against weighted gates → a Fixed / Partially Fixed / Not Fixed /
+UNVERIFIABLE verdict. It is **Anthropic-only** (`models.validate` must be
+`via: cli` or `via: sdk`) and runs inside the SDK permission sandbox (read-only,
+no patch application, no Docker).
+
+**See [validation.md](validation.md)** for the full reference — gate weights,
+verdict bands, per-persona model overrides, `step_validate` knobs, and the
+trust model.
+
+---
+
+## 2b. `remediate` — propose fixes
+
+`vvaharness remediate` reads a prior scan's findings from
+`<repo>/security-scan/` and walks them with the Remediation Agent (step 10),
+running the configured `models.remediate` role per finding. For each finding it
+writes a DTO under `<repo>/security-remediation/<NN_slug>/remediate_report.json`
+(consumed later by `validate`). It is **on by default** for a scan
+(`step_remediate.enabled: true`) and also runnable standalone.
+
+```bash
+# Standalone: remediate the findings of a completed scan
+vvaharness remediate --repo /path/to/target
+
+# Only the 10 highest-CVSS findings, interactive picker, report-only (no edits)
+vvaharness remediate --repo /path/to/target --top 10 -i --mode report-only
+```
+
+| Flag | Effect |
+|---|---|
+| `--repo <path>` | Target repo whose `security-scan/` findings are remediated. **Required.** |
+| `--config <file>` | Config profile path; else `./config.yaml`, else packaged `default.yaml`. |
+| `--mode fix\|report-only` | `fix` (default) applies minimal diffs via Edit/Write — **requires an Anthropic backend (`via: cli`/`via: sdk`)**, as `via: openai` has no edit tools; `report-only` proposes without touching files and works on any backend. |
+| `--top <N\|all\|*>` | Remediate only the N highest-CVSS findings (overrides `step_remediate.top_n_findings`; `all`/`*` does every finding). |
+| `-i`, `--interactive` | Pick which findings to remediate from a menu. |
+| `--resume` | Skip findings already remediated in a prior run. |
+| `-v`, `--verbose` | Print the prompt + raw LLM response per finding. |
+
+The fix-mode tool set is `Read/Glob/Grep/Edit/Write` (cwd-confined) — **Bash is
+denied** so a prompt-injected agent can't reach a host shell.
+
+**See [remediation.md](remediation.md)** for the full reference — modes, the
+`step_remediate` knobs, the policy gate, and the kill-switch.
 
 ---
 
@@ -133,8 +220,16 @@ vvaharness scan --repo-file repos.csv --workspace ./scans --group-by-app --keep-
 | s8 chain | `chain` | exploit-chain analysis + re-ranking → `FinalReport` |
 | s9 SARIF | — (deterministic) | parses the Markdown report → SARIF 2.1.0 |
 
-Each step checkpoints to `<target>/checkpoints/`; `--resume` skips completed
-steps. See [architecture.md](architecture.md) for the data flow and
+Each step checkpoints to the SQLite state DB at
+`$VVAHARNESS_STATE_DIR/vvaharness.db` (default `~/.vvaharness/state/…`;
+`run_id` is derived from the absolute target path); `--resume` skips
+completed steps. A scan **without** `--resume` clears that run's prior
+checkpoints first, so a fresh scan never inherits stale state. `--resume`
+**trusts that the source is unchanged** since the checkpointed run — it does
+**not** detect code edits, so resume only after a clean/aborted run on the same
+code; if the code changed, omit `--resume` or run `vvaharness gc --run <path>`
+to evict the run. Run `vvaharness gc` to prune old runs. See
+[architecture.md](architecture.md) for the data flow and
 [models.md](models.md) for how roles map to backends.
 
 ---
@@ -145,7 +240,7 @@ Each model role picks its own `{id, via}` in `config.yaml: models`:
 
 | `via:` | Transport | Auth | Tools |
 |---|---|---|---|
-| `cli` *(default profile)* | `claude` CLI subprocess | run `claude` then `/login` (or `CLAUDE_CODE_OAUTH_TOKEN` via `claude setup-token`) | Read/Glob/Grep/**Bash** |
+| `cli` *(default profile)* | `claude` CLI subprocess | run `claude` then `/login` (or `CLAUDE_CODE_OAUTH_TOKEN` via `claude setup-token`) | Read/Glob/Grep (the only backend that *can* also run **Bash** — but no shipped profile grants it; add `- Bash` to a role's `allowed_tools` to enable) |
 | `sdk` | Anthropic Python SDK | `ANTHROPIC_SDK_API_KEY` | Read/Glob/Grep (sandboxed) — honours `temperature`, `max_turns` |
 | `openai` | OpenAI-compatible API | `OPENAI_API_KEY` | Read/Glob/Grep (sandboxed) |
 
@@ -159,12 +254,12 @@ in the working dir wins, else the packaged `default.yaml`.
 | Profile | Backend(s) | Use when… | Run |
 |---|---|---|---|
 | `default.yaml` | all `cli` (Read/Glob/Grep) | you have Claude Code auth (`claude login` / OAuth token) — **no SDK key needed**. The built-in default. | *(no flag)* |
-| `cli.yaml` | all `cli`, **+ Bash** | same as default, but you want the agentic stages (`preprocess`, `verify`) to shell out via Bash | `--config vvaharness/config/profiles/cli.yaml` |
+| `sdk.yaml` | all `sdk` (Anthropic Python SDK; sandboxed Read/Glob/Grep, no Bash) | you have `ANTHROPIC_SDK_API_KEY` (not Claude Code auth), or you want s4 majority voting (deepdive @ `temperature: 0.4`, `runs: 3`/`vote_threshold: 2`) | `--config vvaharness/config/profiles/sdk.yaml` |
 | `full.yaml` | mixed `cli`+`sdk`+`openai` | multi-provider; set `ANTHROPIC_SDK_API_KEY` for SDK roles and `OPENAI_API_KEY` for OpenAI roles | `--config vvaharness/config/profiles/full.yaml` |
 
 To pin your own choice, copy a profile to `./config.yaml` and edit it:
 ```bash
-cp vvaharness/config/profiles/cli.yaml ./config.yaml   # then `vvaharness scan` uses it automatically
+cp vvaharness/config/profiles/sdk.yaml ./config.yaml   # then `vvaharness scan` uses it automatically
 ```
 
 For the full walkthrough — config resolution order, `config.local.yaml`
@@ -173,8 +268,15 @@ overrides, secrets in `.env`, and every tunable knob — see
 
 ### Setting / changing the models
 
-Edit the `models:` block of your config. Each of the 8 roles takes `{id, via}`
-— change either independently; it's config-only, no code change:
+Edit the `models:` block of your config. Each of the 8 scan-pipeline roles
+(plus `remediate` and `validate`) takes `{id, via}` — change either
+independently; it's config-only, no code change. **Exception:** `validate`
+(and its `validate_*` personas) is **Anthropic-only** — `via` must be `cli`
+or `sdk`; a `via: openai` validate role aborts the validate stage with exit
+code 2. **Also:** `remediate` in **fix mode** needs an Anthropic backend
+(`via: cli` or `via: sdk`) — only those expose the `Edit`/`Write` tools that
+apply a fix; a `via: openai` remediate role is limited to `--mode report-only`
+(it can read and propose, but cannot edit files).
 ```yaml
 models:
   deepdive:   {id: claude-opus-4-8,  via: sdk}     # SDK on a public Opus
@@ -206,6 +308,40 @@ Mutual TLS (mTLS client certs) is supported on **`via: sdk` only**, not `via: cl
 or `via: openai`. See **[SETUP_GUIDE.md](SETUP_GUIDE.md)** for the full
 when-is-a-cert-needed matrix and env-var names.
 
+**Pinning the `claude` executable (shared/CI hosts).** `via: cli` roles (and the
+`validate` command) launch the `claude` CLI; by default it is resolved to an
+absolute path via `PATH`. On a shared or CI host where `PATH` may include a
+directory another user can write, set **`VVAHARNESS_CLAUDE_BINARY=/abs/path/to/claude`**
+to pin the exact executable and bypass `PATH` resolution entirely (prevents a
+planted `claude` from running under the harness with your credentials).
+
+### Environment variables
+
+Backend **credentials and endpoints** (`ANTHROPIC_SDK_API_KEY`,
+`ANTHROPIC_SDK_BASE_URL`, `OPENAI_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
+`ANTHROPIC_BASE_URL`, `NODE_EXTRA_CA_CERTS`, …) go in `.env` — see
+[`configuration.md`](configuration.md) and [`SETUP_GUIDE.md`](SETUP_GUIDE.md).
+The harness-specific `VVAHARNESS_*` knobs are:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `VVAHARNESS_STATE_DIR` | `~/.vvaharness/state` | Root for the SQLite state DB (`vvaharness.db`), checkpoints, and the batch staging area. Reports under `<repo>/security-scan/` are unaffected. |
+| `VVAHARNESS_DEBUG` | unset | On a fatal scan error, print the full Python traceback to stderr (otherwise a one-line redacted message + a pointer to `*_errors.jsonl`). Set to any value. |
+| `VVAHARNESS_JSON_LOGS` | unset | Emit structured JSON stage events (`stage_start`/`stage_ok`/`stage_fail`) instead of the `▶`/`✓`/`✗` lines. Accepts `1`/`true`/`yes`. |
+| `VVAHARNESS_CLAUDE_BINARY` | `claude` (on `PATH`) | Absolute path to the `claude` executable, bypassing `PATH` (see *Pinning the `claude` executable* above). |
+| `VVAHARNESS_ALLOW_CWD_CONFIG` | unset (gate active) | Opt out of the trust gate that refuses a `--config` / `.env` located **inside the scan target** (which otherwise falls back to the packaged default / is ignored). Set only for a target you trust. |
+| `VVAHARNESS_NO_LOCAL_CONFIG` | unset (overlay applied) | Skip the `config.local.yaml` overlay for a reproducible run that honours **only** the selected config. |
+| `VVAHARNESS_REMEDIATE_DISABLE` | unset | Kill-switch for autonomous remediation: when truthy (`1`/`true`/`yes`/`on`), the remediation gate returns guidance-only for **every** finding (active when `step_remediate.enforce_policy: true`; a `./.vvaharness-remediate-off` file is an equivalent sentinel). See [`remediation.md`](remediation.md). |
+| `VVAHARNESS_GHE_TOKEN` / `VVAHARNESS_GHE_ARCHIVED_TOKEN` | unset | GitHub Enterprise tokens passed to the `validate` agent for `gh api` calls (surfaced to the session as `GH_ENTERPRISE_TOKEN` / `GH_ARCHIVED_TOKEN`). |
+
+> The `validate`/`s11` subsystem also reads a family of overrides
+> (`VVAHARNESS_MODEL`, `VVAHARNESS_EFFORT`, `VVAHARNESS_VIA`, `VVAHARNESS_MAX_TURNS`,
+> `VVAHARNESS_MAX_BUDGET_USD`, `VVAHARNESS_MAX_FINDINGS`, `VVAHARNESS_VALIDATE_TOOLS`,
+> and the per-persona `VVAHARNESS_{SECURITY_ARCHITECT,PENETRATION_TESTER,CROSS_REPO_ANALYZER}_MODEL`).
+> **Don't set these by hand** — the validation CLI exports them automatically from
+> your profile's `models.validate` / `step_validate` block. Tune the profile, not
+> the environment.
+
 ---
 
 ## 5. Output
@@ -218,13 +354,22 @@ Per target, under `<target>/security-scan/`:
 | `<module>_<ts>_report.sarif` | SARIF 2.1.0 for tooling ingestion |
 | `<module>_<ts>_errors.jsonl` | non-fatal errors |
 
+The `validate` command writes per-DTO under
+`<repo>/security-remediation/<NN_slug>/`: the `validation` block is merged back
+into `remediate_report.json` (with `status` set to
+`validated`/`validation_failed`/`needs_review`), plus a redacted
+`validation_session_<finding>.jsonl` transcript. The agent's
+`validation_report.json` and `synthesized_gates.json` are written into an
+ephemeral staging workspace, consumed for host-side scoring, and removed on
+completion — they are **not** persisted under the DTO folder.
+
 Batch runs also write `<workspace>/batch_summary.md`. Every run writes
-`run_manifest.json` (tool version, model roles, config hash, target git SHA,
-timing) so each scan is auditable. See [outputs.md](outputs.md) for the
+`run_manifest.json` in the current working directory (tool version, model
+roles, config hash, target git SHA, timing) so each scan is auditable. See [outputs.md](outputs.md) for the
 full report/SARIF anatomy.
 
 ### Progress & logs
-On an interactive terminal each stage shows a **live spinner** with the X/9
+On an interactive terminal each stage shows a **live spinner** with the X/11
 counter and elapsed time, replaced by a green `✓` + duration when it finishes
 (`✗` on failure). On CI / non-TTY it prints plain `▶`/`✓`/`✗` lines. For
 machine-readable output set **`VVAHARNESS_JSON_LOGS=1`** — each stage then emits
@@ -237,9 +382,10 @@ instead, alongside the existing JSON artifacts (`run_manifest.json`,
 ## 6. Limitations (important)
 
 - **Non-deterministic & LLM-judged.** Treat findings as leads to verify, not
-  ground truth. Majority-vote false-positive filtering only engages on SDK
-  models that accept `temperature`; models that reject it (e.g. Opus 4.7+) run
-  single-pass, and the deterministic s5 pre-filter is the main FP defence.
+  ground truth. Majority-vote false-positive filtering only engages on `via: sdk` or
+  `via: openai` deep-dive models whose runs actually diverge (a model that
+  accepts `temperature`); the `via: cli` backend has no temperature control and
+  SDK models that reject it run single-pass, and the deterministic s5 pre-filter is the main FP defence.
 - **Severity is derived from the CVSS base-score band, not judged separately.**
   Findings are labelled Critical / High / Medium / Low / Info. The four scored
   tiers come straight from the CVSS 3.1 qualitative band — Critical (9.0–10.0),
@@ -249,6 +395,17 @@ instead, alongside the existing JSON artifacts (`run_manifest.json`,
   verbatim on each finding.
 - **Token-hungry.** Cost caps are per-stage / per-finding, not global. Use
   `vvaharness estimate` and the `step*.max_budget_usd` knobs.
+- **Validation is Anthropic-only; remediation _fix mode_ is too.** The `validate`
+  panel refuses a `via: openai` role (aborts with exit code 2). Remediation _fix
+  mode_ needs the `Edit`/`Write` tools that only the `via: cli`/`via: sdk`
+  (Anthropic) backends expose — under `via: openai` it can only run
+  `--mode report-only`. Detection (S1–S9) and report-only remediation run on any
+  backend.
+- **Elevated privilege; trusted targets only.** vvaharness assumes an authorized
+  operator running against a repository they trust. Scanning untrusted or
+  malicious code can expose host credentials, files, or other risk. If you must
+  scan a less-trusted or sensitive target, apply the compensating controls in
+  [`security.md` → Hardening for less-trusted or sensitive targets](security.md#hardening-for-less-trusted-or-sensitive-targets).
 - **No published accuracy numbers yet.** Precision/recall figures are not yet published.
 
 ---
@@ -261,7 +418,7 @@ instead, alongside the existing JSON artifacts (`run_manifest.json`,
 | `ANTHROPIC_SDK_API_KEY not set` | put it in `.env` (auto-loaded) or export it; re-run `vvaharness doctor` |
 | `claude` CLI not found / not logged in | install the Claude Code CLI, then run `claude` and use `/login` (or `claude setup-token`) |
 | Scan too slow / costly on a huge repo | add exclusions in the config `step1` section or use `--auto-step1` |
-| Re-run only later stages | `--resume` (reuses `<target>/checkpoints/`) |
+| Re-run only later stages | `--resume` (reuses checkpoints in `$VVAHARNESS_STATE_DIR/vvaharness.db`) |
 
 See the other guides in this folder for [configuration](configuration.md),
 [models](models.md), [outputs](outputs.md), and [batch-CSV](repos-csv.md) details.

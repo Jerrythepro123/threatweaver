@@ -153,10 +153,9 @@ def test_recommend_default_when_jwt_and_claude(monkeypatch):
     assert prof == "default"
 
 
-def test_recommend_full_when_only_sdk_key(monkeypatch, tmp_path):
-    # An SDK key but NO Claude Code auth: the shipped default/cli profiles are
-    # all via: cli and would ignore the key, so the only key-using shipped
-    # profile is the multi-backend full.yaml.
+def test_recommend_sdk_when_only_sdk_key(monkeypatch, tmp_path):
+    # An SDK key but NO Claude Code auth: sdk.yaml is the drop-in all-SDK
+    # profile (every role via: sdk), so it is the right recommendation.
     monkeypatch.setattr(env.Path, "home", lambda: tmp_path)   # no on-disk CLI login
     monkeypatch.setattr(env.shutil, "which", lambda c: None)  # no claude on PATH
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -164,7 +163,7 @@ def test_recommend_full_when_only_sdk_key(monkeypatch, tmp_path):
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("ANTHROPIC_SDK_API_KEY", "sk-ant-x")
-    assert env.recommend_profile()[0] == "full"
+    assert env.recommend_profile()[0] == "sdk"
 
 
 def test_claude_agent_uses_claude_json_login(monkeypatch, tmp_path):
@@ -204,3 +203,91 @@ def test_run_checks_places_dotenv_after_config(monkeypatch, tmp_path):
     cfg.write_text("models:\n  deepdive: {id: x, via: cli}\n", encoding="utf-8")
     names = [c.name for c in env.run_checks(cfg)]
     assert names[names.index("config") + 1] == ".env"
+
+
+# ── opt-in step 10 (remediate) / step 11 (validate) readiness ────────────────
+def _has(checks, name):
+    return any(c.name == name for c in checks)
+
+
+def test_remediate_validate_absent_when_flags_off(tmp_path):
+    cfg = tmp_path / "p.yaml"
+    cfg.write_text(
+        "models:\n  deepdive: {id: x, via: cli}\n"
+        "  remediate: {id: x, via: cli}\n"
+        "  validate: {id: x, via: cli}\n",
+        encoding="utf-8")
+    checks = env.config_check(cfg)
+    assert not _has(checks, "step10: remediate")
+    assert not _has(checks, "step11: validate")
+
+
+def test_remediate_flag_on_with_cli_backend_ok(monkeypatch, tmp_path):
+    monkeypatch.setattr(env.shutil, "which", lambda c: "/usr/bin/claude")
+    cfg = tmp_path / "p.yaml"
+    cfg.write_text(
+        "models:\n  deepdive: {id: x, via: cli}\n"
+        "  remediate: {id: x, via: cli}\n"
+        "step_remediate:\n  enabled: true\n",
+        encoding="utf-8")
+    checks = env.config_check(cfg)
+    c = next(c for c in checks if c.name == "step10: remediate")
+    assert c.status == OK
+
+
+def test_remediate_flag_on_missing_cli_warns_not_blocking(monkeypatch, tmp_path):
+    monkeypatch.setattr(env.shutil, "which", lambda c: None)
+    cfg = tmp_path / "p.yaml"
+    cfg.write_text(
+        "models:\n  deepdive: {id: x, via: sdk}\n"
+        "  remediate: {id: x, via: cli}\n"
+        "step_remediate:\n  enabled: true\n",
+        encoding="utf-8")
+    checks = env.config_check(cfg)
+    c = next(c for c in checks if c.name == "step10: remediate")
+    assert c.status == WARN and c.required is False
+
+
+def test_validate_flag_on_rejects_openai_backend(monkeypatch, tmp_path):
+    monkeypatch.setattr(env.shutil, "which", lambda c: "/usr/bin/claude")
+    cfg = tmp_path / "p.yaml"
+    cfg.write_text(
+        "models:\n  deepdive: {id: x, via: cli}\n"
+        "  validate: {id: x, via: openai}\n"
+        "step_validate:\n  enabled: true\n",
+        encoding="utf-8")
+    checks = env.config_check(cfg)
+    c = next(c for c in checks if c.name == "step11: validate")
+    assert c.status == WARN
+    assert "openai" in c.detail
+
+
+def test_validate_flag_warns_when_sdk_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(env.shutil, "which", lambda c: "/usr/bin/claude")
+    monkeypatch.setattr(env.importlib.util, "find_spec", lambda m: None)
+    cfg = tmp_path / "p.yaml"
+    cfg.write_text(
+        "models:\n  deepdive: {id: x, via: cli}\n"
+        "  validate: {id: x, via: cli}\n"
+        "step_validate:\n  enabled: true\n",
+        encoding="utf-8")
+    checks = env.config_check(cfg)
+    sdk = next(c for c in checks if c.name == "step11: claude_agent_sdk")
+    assert sdk.status == WARN and "claude_agent_sdk" in sdk.detail
+
+
+def test_optin_step_issues_never_block_scan(monkeypatch, tmp_path):
+    # Even with both opt-in steps misconfigured, summarize() must report zero
+    # blocking issues — the core scan is unaffected, so doctor's live probe runs.
+    monkeypatch.setattr(env.shutil, "which", lambda c: "/usr/bin/claude")
+    monkeypatch.setattr(env.importlib.util, "find_spec", lambda m: None)
+    cfg = tmp_path / "p.yaml"
+    cfg.write_text(
+        "models:\n  deepdive: {id: x, via: cli}\n"
+        "  validate: {id: x, via: openai}\n"
+        "step_remediate:\n  enabled: true\n"
+        "step_validate:\n  enabled: true\n",
+        encoding="utf-8")
+    checks = env.config_check(cfg)
+    _ok, _warn, n_blocking = env.summarize(checks)
+    assert n_blocking == 0

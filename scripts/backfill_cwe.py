@@ -32,7 +32,7 @@ import sys
 from pathlib import Path
 
 from vvaharness.report import enrich as vcs_enrich
-from vvaharness.report.cwe import cwe_name
+from vvaharness.report.cwe import cwe_name, VULNCLASS_CWE
 
 
 FINDING_HDR = re.compile(r"^### \d+\. \[(CRITICAL|HIGH|MEDIUM|LOW|INFO)] (.+)$")
@@ -96,30 +96,15 @@ _KEYWORD_CWE: list[tuple[re.Pattern, str]] = [
     ]
 ]
 
-# ── Fallback: vuln_class → CWE ─────────────────────────────────────────────
-_CLASS_CWE: dict[str, str] = {
-    "injection":             "CWE-74",
-    "heap-overflow":         "CWE-122",
-    "stack-overflow":        "CWE-121",
-    "use-after-free":        "CWE-416",
-    "format-string":         "CWE-134",
-    "integer-overflow":      "CWE-190",
-    "type-confusion":        "CWE-843",
-    "race-condition":        "CWE-362",
-    "unsafe-deserialization":"CWE-502",
-    "logic-flaw":            "CWE-840",
-    "info-leak":             "CWE-200",
-    "other":                 "CWE-693",
-}
-
-
 def derive_cwe(title: str, category: str | None, desc: str = "") -> str | None:
     blob = " ".join(x or "" for x in (title, category, desc))
     for rx, cwe in _KEYWORD_CWE:
         if rx.search(blob):
             return cwe
+    # Fallback: shared VulnClass→CWE map (single source of truth in
+    # vvaharness.report.cwe). "other" maps to "" → no CWE.
     if category:
-        return _CLASS_CWE.get(category.strip().lower())
+        return VULNCLASS_CWE.get(category.strip().lower()) or None
     return None
 
 

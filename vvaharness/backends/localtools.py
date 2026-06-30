@@ -13,9 +13,9 @@
 # limitations under the License.
 
 """
-Local, sandboxed implementations of the Read / Glob / Grep tools so the
-non-CLI backends (backends/sdk.py, backends/oai.py) can run an agentic loop
-without shelling out to `claude`.
+Local, sandboxed implementations of the READ-ONLY Read / Glob / Grep tools
+so the non-CLI backends (backends/sdk.py, backends/oai.py) can run an agentic
+loop without shelling out to `claude`.
 
 All paths are resolved against — and confined to — a single root
 directory (`cwd`). Any attempt to escape (absolute paths, `..`, symlinks
@@ -23,8 +23,25 @@ pointing outside) returns an error string instead of file content. This
 matters because s6 verifiers read attacker-influenced finding text; a
 prompt-injected path must not exfiltrate files outside the scanned repo.
 
-Bash is intentionally NOT provided. s6_verify only requests
-Read/Glob/Grep; s1_preprocess (which wants Bash) should stay on via:cli.
+This module is read-only by design. Its executable surface (`_EXEC`) and tool
+schemas (`_SCHEMAS`) expose Read/Glob/Grep only, and `execute()` returns an
+error string for any other tool name — there are NO file-mutation (Edit/Write)
+tools here.
+
+File mutation for the Remediation Agent's `fix` mode lives elsewhere, NOT in
+this loop:
+  * via:sdk    — backends/agent_sdk.py drives the official Claude Agent SDK,
+                 which provides Edit/Write natively under a deny-by-default
+                 permission gate (`_gate`) that confines writes to the repo
+                 root (`_within_root`).
+  * via:openai — backends/oai.py raises NotImplementedError for any tool this
+                 module does not support, so a mutating role on that route must
+                 stay on `via: cli`.
+
+Bash is intentionally NOT provided. A host shell would defeat the cwd jail
+on prompt-injected/untrusted targets; fix mode applies diffs via the SDK's
+Edit/Write (agent_sdk.py), never a shell. s1_preprocess (which wants Bash for
+repo inventory) should stay on via:cli.
 """
 from __future__ import annotations
 import os

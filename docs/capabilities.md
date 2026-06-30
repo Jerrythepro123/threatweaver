@@ -16,37 +16,56 @@ limitations under the License.
 
 # vvaharness — Features & Capabilities (one-page)
 
-**Agentic SAST** — a 9-stage LLM pipeline · 3 interchangeable backends · 42 languages · **config-driven**.
-Surveys a repo → threat-models → decomposes → deep-dives → verifies → dedups → chains exploits → emits enriched **Markdown + SARIF 2.1.0**. Every stage is a config switch — swap a model/backend with **no code change**.
+**Agentic SAST** — a 9-stage LLM scan pipeline · 3 interchangeable backends · 42 languages · **config-driven**.
+Surveys a repo → threat-models → decomposes → deep-dives → verifies → dedups → chains exploits → emits enriched **Markdown + SARIF 2.1.0**. A `remediate` command proposes fixes and an agentic `validate` command verifies them — both also run **in-scan by default** (see below). Every scan stage is a config switch — swap a model/backend with **no code change**.
 
-> Full reference: **[features.md](features.md)** · shipped profiles: **`vvaharness/config/profiles/`** (`default.yaml`, `cli.yaml`, `full.yaml`)
+> Full reference: **[features.md](features.md)** · shipped profiles: **`vvaharness/config/profiles/`** (`default.yaml`, `sdk.yaml`, `full.yaml`)
 
 ---
 
-## 9-stage pipeline  (checkpointed · `--resume`)
+## 9-stage scan pipeline  (checkpointed · `--resume`)
 
 ```
 s1 preprocess → s2 threatmodel → s3 decompose → s4 deepdive
               → s5 prefilter   → s6 verify     → s7 dedup → s8 chain → s9 SARIF
 ```
 
-| Stage | Role | Model (best blend) | Output |
+| Stage | Role | Model tier (best blend) | Output |
 |---|---|---|---|
-| s1 | preprocess | Sonnet 4.6 | repo survey + call graph → ContextPackage |
-| s2 | threatmodel | Opus 4.8 | assets, trust boundaries, ranked threats |
-| s3 | decompose | Opus 4.8 | risk / taint / specialist chunks |
-| s4 | deepdive | Sonnet 4.6 · T0.4 | per-chunk findings, **×3 majority vote** |
+| s1 | preprocess | high-volume | repo survey + call graph → ContextPackage |
+| s2 | threatmodel | reasoning | assets, trust boundaries, ranked threats |
+| s3 | decompose | reasoning | risk / taint / specialist chunks |
+| s4 | deepdive | high-volume · T0.4 | per-chunk findings, single pass (majority vote opt-in) |
 | s5 | prefilter | *(deterministic)* | confidence + evidence gates |
-| s6 | verify | Opus 4.8 | adversarial TRUE / FALSE_POSITIVE + CVSS |
-| s7 | dedup | Sonnet 4.6 | deterministic + semantic dedup |
-| s8 | chain | Opus 4.8 | exploit-chain analysis + re-rank → report |
+| s6 | verify | reasoning | adversarial TRUE / FALSE_POSITIVE + CVSS |
+| s7 | dedup | high-volume | deterministic + semantic dedup |
+| s8 | chain | reasoning | exploit-chain analysis + re-rank → report |
 | s9 | SARIF | *(deterministic)* | parse report.md → SARIF 2.1.0 |
 
-*(auto-step1 `autoexclude` role runs on Haiku 4.5 — a cheap one-shot exclusion survey.)*
+*(exact model IDs are pinned per role in the active profile, not hard-coded here. The auto-step1 `autoexclude` role is a cheap one-shot exclusion survey; in the shipped profiles it runs on the high-volume tier in `default`/`sdk` and the reasoning tier in `full`.)*
+
+> **The shipped `default` profile runs past s9.** Because `step_remediate.enabled`
+> and `step_validate.enabled` are both true, a plain `vvaharness scan` continues
+> into **s10 remediate** (fix mode — **edits source files in the target repo**)
+> and **s11 validate** (the panel below) — an 11-step run. Pass `--stop-after s9`
+> for detection only, or set those flags false in your profile.
+
+### Standalone `validate` command  (agentic remediation verification)
+
+Run separately over the remediation DTOs the `remediate` command writes. Uses the bundled Claude Agent SDK (Python ≥3.10) and an Anthropic model.
+
+| Stage | Role | Model | Output |
+|---|---|---|---|
+| s10 | *(discovery)* | *(no model spend)* | locate DTOs awaiting validation |
+| s11 | validate | mixed panel — `security-architect` on the reasoning tier, `penetration-tester` & `cross-repo-analyzer` on the high-volume tier (same split in every shipped profile); backend `via: cli` (default) or `via: sdk` (sdk, full) | agentic panel → weighted gate scores → Fixed / Partially Fixed / Not Fixed / UNVERIFIABLE |
 
 > The "best blend" column is a **recommendation**, not the shipped default. The
-> packaged `default.yaml`/`cli.yaml` run every role on `claude-sonnet-4-6` via the
-> `claude` CLI; mix models/backends per role in `config.yaml` to taste.
+> packaged `default.yaml` runs every **detection** role (s1–s8 + autoexclude) on
+> the high-volume tier via the `claude` CLI, with `remediate` on the reasoning
+> tier and the s11 `validate` panel mixed (`security-architect` on the reasoning
+> tier, `penetration-tester` & `cross-repo-analyzer` on the high-volume tier) —
+> all via the CLI (`sdk.yaml` runs the same detection roles via the Anthropic
+> SDK, with s4 voting on); mix models/backends per role in `config.yaml` to taste.
 
 ---
 
@@ -58,8 +77,8 @@ s1 preprocess → s2 threatmodel → s3 decompose → s4 deepdive
 | `sdk` | Anthropic Python SDK | Read · Glob · Grep | `temperature`, `thinking_budget`, `betas`, **mTLS** | `ANTHROPIC_SDK_API_KEY` |
 | `openai` | OpenAI-compatible | Read · Glob · Grep | `temperature` | `OPENAI_API_KEY` |
 
-**Best generic-Claude blend (2M LOC):** Opus 4.8 for reasoning/low-volume (threatmodel, decompose, verify, chain) · Sonnet 4.6 for high-volume + voting (preprocess, deepdive, dedup) · Haiku 4.5 for the survey.
-**Voting note:** s4 majority vote needs `via: sdk` or `via: openai` + `temperature > 0`; `via: cli` and temp-rejecting models (Opus 4.7+) → single-pass.
+**Best generic-Claude blend (2M LOC):** the reasoning tier for low-volume reasoning roles (threatmodel, decompose, verify, chain) · the high-volume tier for high-throughput roles + voting (preprocess, deepdive, dedup) and the auto-step1 survey.
+**Voting note:** s4 majority vote needs `via: sdk` or `via: openai` + `temperature > 0`; `via: cli` and temp-rejecting models → single-pass.
 
 ---
 
@@ -67,23 +86,29 @@ s1 preprocess → s2 threatmodel → s3 decompose → s4 deepdive
 
 | Inputs | Effect | Outputs |
 |---|---|---|
-| target repo / batch CSV | code under scan | `<module>_report.md` |
-| `known_cves.json` | **raises** threat likelihood / focuses the hunt | `<module>_report.sarif` (2.1.0) |
-| `design_controls.yaml` | **downranks** exploitability (demands bypass proof at s6) | `errors.jsonl` |
+| target repo / batch CSV | code under scan | `<module>_<timestamp>_report.md` |
+| `known_cves.json` | **raises** threat likelihood / focuses the hunt | `<module>_<timestamp>_report.sarif` (2.1.0) |
+| `design_controls.yaml` | **downranks** exploitability (demands bypass proof at s6) | `<module>_<timestamp>_errors.jsonl` |
 | `cmdb.csv` | environmental VulContextSeverity scoring | `run_manifest.json` · `batch_summary.md` |
+| remediation DTOs *(`validate`)* | agentic panel fills each DTO's `validation` block | `remediate_report.json` updated (status → validated / failed) |
 
 ---
 
-## 6 cross-cutting specialists  (auto-gated — skip when no matching surface)
+## Cross-cutting specialists  (auto-gated — skip when no matching surface)
 
-| Specialist | Focuses on |
-|---|---|
-| `crypto` | weak/abusable crypto, key handling, JWT alg-confusion, IV reuse, non-CSPRNG |
-| `logic-bug` | TOCTOU races, state-machine flaws, sentinel/overflow *(always on)* |
-| `access-control` | IDOR/BOLA, missing authz, priv-esc, mass assignment, tenant leakage |
-| `deserialization` | untrusted `readObject`/`pickle`/`yaml.load`/`BinaryFormatter` → RCE |
-| `batch-etl` | pipeline path traversal, COMP-3/EBCDIC parsing, CSV formula injection |
-| `iac` | wildcard IAM, public exposure, root containers, CI command injection |
+Six specialist lenses are defined; **five are active by default**
+(`step3.specialists: crypto, logic-bug, access-control, batch-etl, iac`).
+`deserialization` is defined and available but **opt-in** — add it to
+`step3.specialists` to enable it.
+
+| Specialist | Default | Focuses on |
+|---|---|---|
+| `crypto` | ✅ | weak/abusable crypto, key handling, JWT alg-confusion, IV reuse, non-CSPRNG |
+| `logic-bug` | ✅ | TOCTOU races, state-machine flaws, sentinel/overflow |
+| `access-control` | ✅ | IDOR/BOLA, missing authz, priv-esc, mass assignment, tenant leakage |
+| `batch-etl` | ✅ | pipeline path traversal, COMP-3/EBCDIC parsing, CSV formula injection |
+| `iac` | ✅ | wildcard IAM, public exposure, root containers, CI command injection |
+| `deserialization` | ⬚ opt-in | untrusted `readObject`/`pickle`/`yaml.load`/`BinaryFormatter` → RCE |
 
 ---
 
@@ -115,6 +140,6 @@ s1 preprocess → s2 threatmodel → s3 decompose → s4 deepdive
 
 ---
 
-> **Limitations:** findings are LLM-generated **triage candidates** — human review required. Runs are non-deterministic. Severity is labelled None / Low / Medium / High / Critical per the CVSS 3.1 bands; the base score (0–10) is reported verbatim.
+> **Limitations:** findings are LLM-generated **triage candidates** — human review required. Runs are non-deterministic. Severity is labelled Critical / High / Medium / Low / Info per the CVSS 3.1 bands; the base score (0–10) is reported verbatim.
 
 *© 2026 Visa, Inc. · Apache-2.0*

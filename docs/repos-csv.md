@@ -21,7 +21,7 @@ read from a local path) and scanned. With `--group-by-app`, all repos that
 share an `AppId` are staged under one directory and scanned **once**, producing
 one report per application instead of one per repo.
 
-A worked example ships at `inputs/repos.example.csv`.
+A worked example ships at `inputs/repos.example.csv`. Note: the CSV parser does **not** support `#` comment lines or a leading blank line — the very first row of the file must be the header. (Unlike the `.txt` batch format, which skips `#`-comment and blank lines.)
 
 ## Columns
 
@@ -29,15 +29,18 @@ A worked example ships at `inputs/repos.example.csv`.
 |---|---|---|---|
 | `AppId` | **yes** | `application_id`, `app_id`, `applicationid` | Your application / project / asset identifier. Free-form string; used for grouping, CMDB lookup, and tagged into SARIF `run.properties.applicationId`. |
 | `RepoName` | **yes** | `repository_name`, `repo_name`, `repo` | Repo slug (e.g. `org/project` or `project`). Used as the module name in report filenames and, when `Path` is blank, to build the clone URL. |
-| `Path` | no | `url`, `repo_url`, `ref` | Where to get the code. Either a **git URL** (`https://…`, `ssh://…`, `git@…`) or an **existing local directory**. If blank/absent, the URL is derived as `{batch.git_base_url}/{RepoName}.git`. |
+| `Path` | no | `url`, `repo_url`, `ref` | Where to get the code. Either a **git URL** (`https://…`, `http://…`, `ssh://…`, `git@…`, or anything ending in `.git`) or an **existing local directory**. If blank/absent, the URL is derived as `{batch.git_base_url}/{RepoName}.git`. |
 
 Any other columns in the file are **ignored** — you can keep owner, tier,
 notes, etc. alongside and the parser won't care.
 
 ## Rules
 
-- **Header row is mandatory.** Column names are matched case-insensitively
-  against the aliases above; column order is free.
+- **The header must be the literal first row** of the file. Column names are
+  matched case-insensitively against the aliases above; column order is free.
+  `#` comment lines and leading blank lines are **not** skipped before the
+  header (unlike the `.txt` batch format), so the file must start with the
+  column header.
 - Encoding: UTF-8 (BOM tolerated).
 - Blank rows are skipped. Rows where both `AppId` and `RepoName` are empty
   are skipped; a row with only one of them is a validation error.
@@ -49,7 +52,10 @@ notes, etc. alongside and the parser won't care.
   local directory is a validation error.
 - A `Path` that begins with `-` is rejected (it would otherwise be read by
   `git clone` as an option rather than a URL).
-- Duplicate `Path` values across rows are rejected.
+- Duplicate clone targets across rows are rejected. The check applies to the
+  **resolved** location: an explicit `Path`, or — when `Path` is blank — the
+  URL derived from `RepoName`. So two rows that resolve to the same URL
+  (e.g. the same `RepoName` with blank `Path`) are rejected as duplicates.
 
 > The batch list is a **trust boundary**: it is assumed to be authored by a
 > trusted operator. Restrict it to HTTPS URLs on hosts you control, and never
@@ -104,11 +110,14 @@ vvaharness scan --repo-file repos.csv --workspace ./scans --group-by-app --auto-
 ```
 
 Outputs for **cloned (remote) repos** land in `./scans/<AppId>/security-scan/`
-(grouped) or `./scans/<RepoName>/security-scan/` (ungrouped). A row whose
-`Path` is an **existing local directory** is scanned in place, so its
-`security-scan/` and `checkpoints/` are written **inside that source
-directory**, not under `./scans/`. Either way a `./scans/batch_summary.md` is
-written.
+(grouped) or `./scans/<RepoName>/security-scan/` (ungrouped; the `RepoName` is sanitised for filesystem use, so a slug like `org/project` becomes `org_project`). In **ungrouped**
+mode a row whose `Path` is an **existing local directory** is scanned in place,
+so its `security-scan/` is written **inside that source directory**, not under
+`./scans/`. Under `--group-by-app`, a local directory is instead **copied**
+(`.git` excluded) into `./scans/<AppId>/<slug>/` and scanned there, so its
+`security-scan/` lands under `./scans/`. Pipeline checkpoints always go to the SQLite state DB at
+`$VVAHARNESS_STATE_DIR/vvaharness.db` (default `~/.vvaharness/state/…`),
+never inside the source. Either way a `./scans/batch_summary.md` is written.
 
 ---
 

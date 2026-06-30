@@ -21,6 +21,9 @@ import sys
 # Strip ```json ... ``` fences if present, then find the first balanced
 # brace/bracket block. Good enough for structured-output prompts.
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+# Leading fence opener only (```/```json/```python …) — used to peek past it
+# at the first content character without committing to a closing fence.
+_FENCE_OPEN = re.compile(r"^```\w*\s*")
 
 # Defensive ceiling on the text scanned. The balanced-span scan is O(openers ×
 # length), so a pathological blob with many '{'/'[' could be quadratic. Normal
@@ -89,11 +92,34 @@ def extract_json(text: str) -> dict | list:
               f"{_MAX_JSON_INPUT}; scanning the first {_MAX_JSON_INPUT} only",
               file=sys.stderr)
         text = text[:_MAX_JSON_INPUT]
+    stripped = text.strip()
     # Prefer fenced block(s), but ALWAYS keep the whole response as a final
     # candidate so JSON placed OUTSIDE a (possibly non-JSON) fenced block — e.g.
     # an agent that shows a code snippet in a fence then trails the real JSON —
     # is still recovered instead of dropped.
-    candidates = _FENCE.findall(text) + [text]
+    candidates: list[str] = []
+    # HB-009: a literal ``` appearing INSIDE a JSON string value (e.g. a chain
+    # narrative quoting a code block) makes the non-greedy _FENCE.findall()
+    # terminate at that inner ``` and return a truncated, unbalanced body. When
+    # the WHOLE trimmed response is one fenced block, an anchored fullmatch
+    # yields the correct full body regardless of inner backticks — try that
+    # first. This is purely additive: the original findall() candidates remain
+    # below, so every input the old code handled still falls through unchanged.
+    whole = _FENCE.fullmatch(stripped)
+    if whole:
+        candidates.append(whole.group(1))
+    candidates += _FENCE.findall(text)
+    candidates.append(text)
+
+    # Defence-in-depth for HB-009: if the response (past any opening fence)
+    # visibly starts with '{', a top-level *list* result is almost certainly a
+    # sub-span like "[10]" that happened to balance inside a string literal.
+    # Hold the first such list and keep scanning for a dict; only return the
+    # held list if no dict is found in any candidate. When the response does
+    # NOT start with '{' this guard is inert and behaviour is unchanged.
+    peek = _FENCE_OPEN.sub("", stripped, count=1)
+    want_dict = peek[:1] == "{"
+    held_list: list | None = None
     last_err: Exception | None = None
 
     for cand in candidates:
@@ -109,8 +135,9 @@ def extract_json(text: str) -> dict | list:
                 # this opener and keep scanning for a later balanced block.
                 i += 1
                 continue
+            val = None
             try:
-                return json.loads(span)
+                val = json.loads(span)
             except json.JSONDecodeError as e:
                 last_err = e
                 # LLMs frequently emit invalid backslash escapes inside string
@@ -118,11 +145,21 @@ def extract_json(text: str) -> dict | list:
                 repaired = _repair_invalid_escapes(span)
                 if repaired != span:
                     try:
-                        return json.loads(repaired)
+                        val = json.loads(repaired)
                     except json.JSONDecodeError:
                         pass
+            if val is None:
                 i += len(span)
+                continue
+            if want_dict and isinstance(val, list):
+                if held_list is None:
+                    held_list = val
+                i += len(span)
+                continue
+            return val
 
+    if held_list is not None:
+        return held_list
     if last_err:
         raise last_err
     raise ValueError("no JSON object found in response")

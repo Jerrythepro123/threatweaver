@@ -14,6 +14,8 @@
 from __future__ import annotations
 """orchestrator.scan — see package docstring."""
 import copy
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -35,27 +37,85 @@ from vvaharness.report.redact import redact
 from vvaharness.orchestrator.config_paths import (_resolve_against, _iter_model_roles)
 from vvaharness.orchestrator.checkpoints import (save_ckpt, load_ckpt,
     run_id_for)
+from vvaharness.orchestrator import store as _store
 from vvaharness.orchestrator.cmdb import _load_app_profile
 from vvaharness.orchestrator.enrich_findings import _enrich_findings
+
+
+def _head_sha(repo: Path) -> str | None:
+    """Return the scanned repo's current git HEAD SHA (or None for a non-git
+    target / git failure). Used to pin the report's git_sha and to refuse
+    remediation when the working tree has moved since the scan."""
+    try:
+        r = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=20)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:                                  # noqa: BLE001
+        return None
 
 
 def scan_repo(repo: Path, repo_name: str, application_id: str | None,
               args, cfg,
               path_prefix: str | None = None) -> tuple[Path | None, int]:
     """
-    Run the full s1→s9 pipeline against one local checkout.
+    Run the full s1→s10 pipeline against one local checkout.
 
     Returns (markdown_report_path, verified_finding_count). Raises on failure —
     the batch driver catches and records it. Returns (None, 0) when
-    --stop-after short-circuits before s8.
+    --stop-after short-circuits before s8. Step 10 (remediation) only runs when
+    opted in via --remediate or cfg.step_remediate.enabled; it walks the
+    findings one-by-one with the Remediation Agent and writes per-finding
+    artefacts under <repo>/security-remediation/. Step 11 (validation) only
+    runs when opted in via cfg.step_validate.enabled; it reads those artefacts
+    and fills each DTO's validation block via the vvaharness.validation package.
     """
     run_id = run_id_for(repo)
 
     # ── per-repo output layout ───────────────────────────────────────────
-    # Checkpoints and final report both live under the TARGET repo so each
-    # scanned project carries its own artefacts.
-    ckpt_dir = repo / "checkpoints"
+    # SECURITY: checkpoint state MUST NOT live inside the scanned repo — a
+    # hostile target could otherwise pre-plant state that --resume would
+    # load. (Payloads are JSON, never pickle, so planted bytes cannot execute
+    # code — but they could still poison the pipeline, so defense-in-depth
+    # keeps them outside the clone.) State is the SQLite DB at
+    # <state>/vvaharness.db; the legacy <state>/checkpoints/<run_id>/ dir is
+    # used only for the --auto-step1 overlay file. Override the root with
+    # $VVAHARNESS_STATE_DIR for CI / tests.
+    _state = Path(os.environ.get("VVAHARNESS_STATE_DIR")
+                  or (Path.home() / ".vvaharness" / "state"))
+    ckpt_dir = _state / "checkpoints" / run_id
+    # Checkpoint payloads now live in the SQLite state store; ckpt_dir is
+    # passed through to save_ckpt/load_ckpt for call-site compatibility
+    # (they ignore it). It is created on disk ONLY under --auto-step1, for
+    # the per-target step1.yaml overlay — see the auto_step1 block below.
+    _store.register_run(run_id, repo_root=str(repo.resolve()),
+                        repo_name=repo_name, app_id=application_id)
+
+    # Fresh scan (no --resume) == start over. run_id is path-derived, so a
+    # rescan of this same repo reuses the prior run's checkpoint rows; without
+    # an explicit reset, stale rows survive — steps a stopped run never reached,
+    # and the dynamic remediate_<idx>/validate_<id> rows (whose keys may not
+    # recur for a changed finding set) — and a later --resume would load them.
+    # Purge them now so the only state a future --resume can see is this scan's.
+    # Gated on `not args.resume`: --resume deliberately keeps prior state.
+    if not args.resume:
+        _cleared = _store.reset_run(run_id)
+        if _cleared:
+            print(f"  [ckpt] reset {run_id[:12]}… — cleared {_cleared} stale "
+                  f"checkpoint row(s) from a prior scan", file=sys.stderr)
+
     out_dir = repo / "security-scan"
+
+    # Belt-and-braces: refuse --resume if ckpt_dir somehow resolves inside the
+    # target tree (symlink, hostile $VVAHARNESS_STATE_DIR, future refactor).
+    if args.resume:
+        try:
+            ckpt_dir.resolve().relative_to(repo.resolve())
+        except ValueError:
+            pass  # good — ckpt_dir is OUTSIDE the repo
+        else:
+            print("✗ refusing --resume: checkpoint dir resolves inside the "
+                  "scanned repository", file=sys.stderr)
+            return None, 0
 
     t0 = time.time()
     start_ts = _metrics.now_iso()
@@ -76,6 +136,7 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     # accumulate each other's overlays. Skipped when --step1-config supplied
     # an explicit overlay (handled at startup).
     if getattr(args, "auto_step1", False):
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
         auto_path = ckpt_dir / "step1.yaml"
         if not (args.resume and auto_path.is_file()):
             try:
@@ -122,7 +183,7 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     # ── Step 1 — Pre-process (runs first; s2 consumes its output) ───────
     ctx: ContextPackage | None = load_ckpt(ckpt_dir, run_id, "s1") if args.resume else None
     if ctx is None:
-        with stage(f"Step 1 — Pre-process ({_m('preprocess')})", n=1, total=9), \
+        with stage(f"Step 1 — Pre-process ({_m('preprocess')})", n=1, total=11), \
                 TOKENS.phase("s1-preprocess"):
             ctx = s1_preprocess.run(str(repo), cfg, cves, controls)
         save_ckpt(ckpt_dir, run_id, "s1", ctx)
@@ -137,7 +198,7 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     if tm is None and s2_enabled:
         try:
             with stage(f"Step 2 — Threat model ({_m('threatmodel')})",
-                       n=2, total=9), TOKENS.phase("s2-threatmodel"):
+                       n=2, total=11), TOKENS.phase("s2-threatmodel"):
                 tm = s2_threatmodel.run(str(repo), repo_name, cfg, cves,
                                         controls, ctx=ctx,
                                         app_profile=app_profile)
@@ -155,7 +216,7 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     # ── Step 3 ───────────────────────────────────────────────────────────
     manifest: TaskManifest | None = load_ckpt(ckpt_dir, run_id, "s3") if args.resume else None
     if manifest is None:
-        with stage(f"Step 3 — Decompose ({_m('decompose')})", n=3, total=9), \
+        with stage(f"Step 3 — Decompose ({_m('decompose')})", n=3, total=11), \
                 TOKENS.phase("s3-decompose"):
             manifest = s3_decompose.run(ctx, cfg)
         save_ckpt(ckpt_dir, run_id, "s3", manifest)
@@ -169,7 +230,7 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
         with stage(f"Step 4 — Deep-dive ({_m('deepdive')}; {cfg.step4.runs} runs, "
                    f"vote≥{cfg.step4.vote_threshold}, "
                    f"parallel={getattr(cfg.step4, 'parallel', 1)})",
-                   n=4, total=9), TOKENS.phase("s4-deepdive"):
+                   n=4, total=11), TOKENS.phase("s4-deepdive"):
             findings, chunk_outcomes = s4_deepdive.run(manifest.sorted_chunks(), ctx, cfg)
         # Bundle the per-chunk outcomes with the findings so a --resume that
         # rebuilds metrics still sees the coverage tally.
@@ -189,16 +250,16 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     s7_ckpt = load_ckpt(ckpt_dir, run_id, "s7") if args.resume else None
     if s7_ckpt is None:
         with stage("Step 5 — Pre-filter (deterministic + semantic pre-dedup)",
-                   n=5, total=9), TOKENS.phase("s5-prefilter"):
+                   n=5, total=11), TOKENS.phase("s5-prefilter"):
             findings, pre_dropped = s5_prefilter.run(findings, ctx, cfg)
         if args.stop_after == "s5":
             return None, 0
-        with stage(f"Step 6 — Verify ({_m('verify')})", n=6, total=9), \
+        with stage(f"Step 6 — Verify ({_m('verify')})", n=6, total=11), \
                 TOKENS.phase("s6-verify"):
             verified, dropped = s6_verify.run(findings, ctx, cfg)
         if args.stop_after == "s6":
             return None, 0
-        with stage(f"Step 7 — Dedup ({_m('dedup')})", n=7, total=9), \
+        with stage(f"Step 7 — Dedup ({_m('dedup')})", n=7, total=11), \
                 TOKENS.phase("s7-dedup"):
             canonical, dup_dropped = s7_dedup.run(verified, cfg)
         save_ckpt(ckpt_dir, run_id, "s7",
@@ -230,7 +291,7 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
             false_pos=fp, duplicates=len(dup_dropped),
             chunk_outcomes=chunk_outcomes,
         )
-        with stage(f"Step 8 — Chain ({_m('chain')})", n=8, total=9), \
+        with stage(f"Step 8 — Chain ({_m('chain')})", n=8, total=11), \
                 TOKENS.phase("s8-chain"):
             report = s8_chain.run(canonical, ctx, cfg,
                               dropped=all_dropped,
@@ -239,6 +300,9 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
         report.repo_name = repo_name
         report.threat_model = tm
         report.app_profile = app_profile
+        # B9: pin HEAD so step 10 (now or later via remediate --from-report)
+        # can refuse on mismatch.
+        report.git_sha = _head_sha(repo)
         save_ckpt(ckpt_dir, run_id, "s8", report)
 
     # ── Output (always re-render — cheap, and s9 needs it on disk) ───────
@@ -263,12 +327,49 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
                                 if report.metrics else {}),
         }
         with stage(f"Step 9 — SARIF (app_id={application_id or '-'})",
-                   n=9, total=9):
+                   n=9, total=11):
             vcs_enrich.md_to_sarif(str(out_path), application_id, app_info,
                                     str(sarif_path), scan_health=scan_health)
         print(f"  [out] wrote {sarif_path}", file=sys.stderr)
         save_ckpt(ckpt_dir, run_id, "s9", str(sarif_path))
     if args.stop_after == "s9":
+        return out_path, len(report.findings)
+
+    # ── Step 10 — Remediate (opt-in) ────────────────────────────────────
+    # B3: runs INSIDE scan_repo() so the clone still exists. OFF unless
+    # --remediate or step_remediate.enabled. The Remediation Agent walks the
+    # verified findings one-by-one and writes per-finding artefacts under
+    # <repo>/security-remediation/<NN_slug>/ — exactly the same layout the
+    # standalone `vvaharness remediate` command produces. 
+    rem_cfg = getattr(cfg, "step_remediate", None)
+    rem_on = bool(getattr(args, "remediate", False)
+                  or getattr(rem_cfg, "enabled", False))
+
+    if rem_on and report.findings:
+        rem_err = _remediate_preflight(cfg, args, repo, report)
+        if rem_err:
+            print(f"  [s10] DISABLED — {rem_err}", file=sys.stderr)
+            _errlog.log("s10.preflight", repo_name, RuntimeError(rem_err))
+        else:
+            with stage(f"Step 10 — Remediate ({_m('remediate')})",
+                       n=10, total=11), TOKENS.phase("s10-remediate"):
+                _run_remediation(report, repo, cfg, ckpt_dir, run_id,
+                                 resume=args.resume,
+                                 top=getattr(args, "top", None),
+                                 report_md=out_path)
+
+    if args.stop_after == "s10":
+        return out_path, len(report.findings)
+
+    # ── Step 11 — Validate (opt-in) ─────────────────────────────────────
+    val_cfg = getattr(cfg, "step_validate", None)
+    val_on = bool(getattr(val_cfg, "enabled", False))
+    if val_on:
+        with stage("Step 11 — Validate (s11)", n=11, total=11), \
+                TOKENS.phase("s11-validate"):
+            _run_validation(repo, cfg, config_path=args.config, resume=args.resume,
+                            report_md=out_path)
+    if args.stop_after == "s11":
         return out_path, len(report.findings)
 
     elapsed = time.time() - t0
@@ -286,3 +387,143 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     # Print markdown to stdout for piping
     print(md_text)
     return out_path, len(report.findings)
+
+
+def _ranked_to_ra_finding(rf, idx: int):
+    """Adapt a pipeline ``RankedFinding`` into the Remediation Agent's
+    lightweight ``Finding`` shape so the same prompt/artefact path the
+    standalone ``vvaharness remediate`` command uses also drives the
+    in-pipeline run. Kept local to the orchestrator so remediation does not
+    depend on the (separately owned) validation bridge."""
+    from vvaharness.remediation_agent.report_parser import Finding as RAFinding
+    f = rf.finding
+    loc = f"{f.file}:{f.line_start}"
+    if f.line_end and f.line_end != f.line_start:
+        loc = f"{f.file}:{f.line_start}-{f.line_end}"
+    body_parts = [
+        f"### {idx + 1}. [{rf.severity.value.upper()}] {f.title}",
+        f"**Class:** {f.cwe or f.vuln_class.value}",
+        f"**File:** `{loc}`",
+        "",
+        f.description or "",
+    ]
+    if f.source_ref:
+        body_parts.append(f"**Source:** {f.source_ref}")
+    if f.sink_ref:
+        body_parts.append(f"**Sink:** {f.sink_ref}")
+    if f.code_snippet:
+        body_parts.append("\n```\n" + f.code_snippet + "\n```")
+    return RAFinding(
+        index=idx + 1,
+        severity=rf.severity.value.upper(),
+        title=f.title,
+        file=loc,
+        body="\n".join(body_parts),
+    )
+
+
+def _run_remediation(report: FinalReport, repo: Path, cfg, ckpt_dir, run_id,
+                     *, resume: bool = False, top: int | None = None,
+                     report_md: Path | None = None) -> None:
+    """Walk the verified findings one-by-one with the Remediation Agent.
+
+    Adapts the pipeline's ranked findings into the Remediation Agent's
+    ``Finding`` shape, applies the profile-driven top-N cap, then delegates the
+    per-finding loop to the SAME ``runner.process_findings`` the standalone
+    ``vvaharness remediate`` command uses — so the in-pipeline and standalone
+    paths share ONE loop implementation (checkpoint/resume, failure-isolation,
+    policy gate, and report augmentation) instead of duplicating it (CWE-1041).
+
+    Each finding's artefacts land under ``<repo>/security-remediation/<NN_slug>/``
+    (a canonical ``remediate_report.json`` plus an ``evidence/`` subfolder) for
+    the s11 validation step to read.
+
+    The top-N cap is profile-driven (``step_remediate.top_n_findings``); when
+    *top* is set (``--top N``) it overrides the profile for this run. Either way
+    only the N highest-CVSS findings are remediated (limit & reorder, highest
+    score first) via the SAME shared selection helper the standalone command
+    uses; selection happens on the in-memory list only — the report on disk is
+    untouched.
+
+    Progress is checkpointed per finding (``remediate_<idx>``) using the same
+    state store as the scan pipeline: the scan's existing ``ckpt_dir``/``run_id``
+    are threaded through ``Layout`` so ``--resume`` skips completed findings and
+    scan + remediation state live together."""
+    from vvaharness.remediation_agent.report_parser import REMEDIATION_DIR_NAME
+    from vvaharness.remediation_agent.select import resolve_top, select_top_logged
+    from vvaharness.remediation_agent.runner import process_findings
+    from vvaharness.remediation_agent.discovery import Layout
+    from vvaharness.remediation_agent.options import RemediateOptions
+
+    rem_dir = repo / REMEDIATION_DIR_NAME
+    rem_dir.mkdir(parents=True, exist_ok=True)
+
+    # Top-N cap: profile's step_remediate.top_n_findings is the source of truth;
+    # --top N overrides it ad-hoc. Keep only the N highest-CVSS findings.
+    # RankedFinding carries the numeric base score on its wrapped Finding; the
+    # shared helper applies the SAME gate + log line as the standalone command
+    # and reorders highest→lowest, then we adapt each to the Remediation Agent's
+    # Finding shape (process_findings consumes a pre-selected list; selecting on
+    # RankedFindings is orchestrator-specific).
+    eff_top = resolve_top(top, cfg)
+    selected = select_top_logged(
+        report.findings, eff_top,
+        score_of=lambda rf: rf.finding.cvss_score,
+        log_prefix="[s10]")
+    findings = [_ranked_to_ra_finding(rf, idx) for idx, rf in enumerate(selected)]
+
+    print(f"  [s10] ⚠ FIX MODE — about to EDIT source files in {repo}; "
+          f"rerun with --stop-after s9 to scan without modifying the target", file=sys.stderr)
+    print(f"  [s10] remediating {len(findings)} finding(s) via Remediation Agent; "
+          f"artefacts → {rem_dir}", file=sys.stderr)
+
+    # Delegate the per-finding loop to the shared runner, retiring the duplicate
+    # loop. Thread the scan's existing ckpt_dir/run_id through Layout so resume
+    # state is shared, and force fix mode (the in-pipeline path always auto-edits);
+    # process_findings builds the policy context and runs the SAME deny-list +
+    # playbook + diff post-gate, and binds *report_md* for augmentation so the
+    # combined report cannot be redirected by a newest-wins glob (MV-06).
+    layout = Layout(rem_dir=rem_dir, ckpt_dir=ckpt_dir, run_id=run_id)
+    opts = RemediateOptions(resume=resume, mode="fix")
+    process_findings(findings, layout=layout, cfg=cfg, repo_path=repo,
+                     opts=opts, report=report_md)
+
+
+
+
+def _run_validation(repo: Path, cfg, *, config_path: str, resume: bool = False,
+                    report_md: Path | None = None) -> None:
+    """Invoke the s11 validation package against any validatable remediate_report.json files.
+
+    ``config_path`` is the scan's resolved ``--config`` (``args.config``): the validator
+    re-reads it so the s11 model/backend/budget match the profile the scan ran with,
+    rather than silently falling back to the packaged default.
+
+    Resumes (skips already-checkpointed findings) iff the scan was launched with
+    ``--resume`` — lockstep with s10 remediation."""
+    from vvaharness.pipeline.stages.s11_validate import run as s11_run
+    rc = s11_run(repo, cfg=cfg, config_path=config_path, resume=resume, report_md=report_md)
+    if rc != 0:
+        print(f"  [s11] WARN: validation exited with code {rc}", file=sys.stderr)
+
+
+def _remediate_preflight(cfg, args, repo: Path, report) -> str | None:
+    """Hard checks before remediation may run. Returns an error string
+    (which DISABLES remediation for this repo, scan continues) or
+    None to proceed.
+
+    Checks are scoped to what the Remediation Agent needs: a configured
+    ``models.remediate`` role and a stable working tree (so the report's line
+    numbers still match the code on disk)."""
+    rem = getattr(cfg.models, "remediate", None)
+    if rem is None:
+        return "models.remediate must be set"
+
+    # B9: refuse if the working tree has moved since the report was
+    # built (line numbers would be stale → patch lands on wrong code).
+    cur = _head_sha(repo)
+    if (report.git_sha and cur and report.git_sha != cur
+            and not getattr(args, "force", False)):
+        return (f"HEAD moved since scan ({report.git_sha[:8]} → "
+                f"{cur[:8]}); pass --force to override")
+    return None

@@ -128,16 +128,52 @@ def _norm_rel(repo_root: str, p: str) -> str:
     return p
 
 
+def _resolve_scope_path(path: str, repo_root: str, keep: set[str],
+                        top_dirs: list[str]) -> tuple[str | None, bool]:
+    """Resolve an agent-emitted path to its in-scope inventory form.
+
+    Returns ``(resolved, ambiguous)``:
+      * exact inventory hit                          -> (rel, False)
+      * unprefixed path under EXACTLY ONE top dir    -> (that path, False)
+      * unprefixed path under 2+ top dirs            -> (None, True)   # ambiguous
+      * no match                                     -> (None, False)
+
+    The agent sometimes omits the leading directory (in --group-by-app mode the
+    repo prefix; in single-repo mode a top-level dir). The fallback re-prefixes
+    with each top-level dir. When 2+ top dirs match the same relative path,
+    returning the alphabetically-first one would misattribute sinks / entry
+    points / module files to the wrong directory (or wrong repo). So that case
+    is NOT guessed — it returns ambiguous=True and the caller drops it (fail
+    safe: no wrong attribution) and logs the loss. Exact and single-match cases
+    are byte-identical to the previous first-match behaviour."""
+    rel = _norm_rel(repo_root, path)
+    if rel in keep:
+        return rel, False
+    matches = [f"{td}/{rel}" for td in top_dirs if f"{td}/{rel}" in keep]
+    if len(matches) == 1:
+        return matches[0], False
+    return None, len(matches) > 1
+
+
 def _walk_repo(repo_root: str, cfg) -> tuple[list[str], dict]:
     root = Path(repo_root)
     root_resolved = root.resolve()
     excl_dirs, excl_exts, excl_globs = _exclusion_sets(cfg)
     max_kb = getattr(cfg.step1, "max_file_kb", 1024)
-    # Default-secure, but coverage-preserving: in-tree symlinks (common in
-    # monorepos) are still scanned; only links whose target resolves OUTSIDE
-    # the repo are dropped. Set step1.follow_symlinks: true to follow off-root
-    # links too (not recommended for untrusted targets).
+    # Default-secure AND not config-disableable: in-tree symlinks (common in
+    # monorepos) are still scanned, but links whose target resolves OUTSIDE the
+    # repo are dropped UNCONDITIONALLY (see the loop below). `follow_symlinks`
+    # used to gate that containment check off — letting an untrusted repo's
+    # off-root link + a shared/CI config writer exfiltrate host files (SSH keys,
+    # /etc/passwd) into the inventory and LLM prompts. It no longer does. The key
+    # is still accepted for back-compat; if it is set, warn that off-root targets
+    # remain blocked rather than silently ignore the operator's intent.
     follow_symlinks = bool(getattr(cfg.step1, "follow_symlinks", False))
+    if follow_symlinks:
+        print("  [s1] NOTE: step1.follow_symlinks is set, but symlinks whose "
+              "target resolves outside the repo are still dropped (host-file "
+              "disclosure guard); only in-tree symlinks are followed.",
+              file=sys.stderr)
 
     out: list[str] = []
     skipped_dirs: dict[str, int] = {}
@@ -151,9 +187,11 @@ def _walk_repo(repo_root: str, cfg) -> tuple[list[str], dict]:
         rel = str(p.relative_to(root)).replace("\\", "/")
         # rglob + is_file() follow symbolic links, so a committed symlink whose
         # target resolves outside the repo would otherwise pull arbitrary host
-        # file content (e.g. ~/.ssh/id_rsa) into the inventory and LLM prompts.
-        # Reject those out-of-root links unless explicitly opted in.
-        if not follow_symlinks and p.is_symlink():
+        # file content (e.g. ~/.ssh/id_rsa, /etc/passwd) into the inventory and
+        # LLM prompts. This containment check is UNCONDITIONAL — it is not gated
+        # on follow_symlinks — so neither a shared/CI config flag nor an
+        # attacker-supplied --step1-config overlay can re-open off-host reads.
+        if p.is_symlink():
             try:
                 tgt = p.resolve(strict=False)
                 escapes = not tgt.is_relative_to(root_resolved)
@@ -358,36 +396,64 @@ def _dedup_configs(files: list[str], repo_root: Path, cfg) -> tuple[list[str], d
     want_sec = dd["promote_on_secret_hit"]
     want_ins = dd["promote_on_insecure_value"]
 
-    # Pass 1 — read + shape-hash. Parallel because Windows file I/O (and AV
-    # on-access scanning) dominates; threading gives ~6-8x here.
-    def _load(rel: str):
+    # Pass 1 — shape-hash only. We deliberately DISCARD each body after hashing
+    # rather than retaining it: holding every parseable candidate's text in one
+    # dict made peak RAM scale with candidate count (only per-file size was ever
+    # capped, never count or aggregate bytes), an availability pressure on the
+    # worker for a hostile repo with many sub-cap config files. Parallel because
+    # Windows file I/O (and AV on-access scanning) dominates; ~6-8x here.
+    def _hash(rel: str):
         p = repo_root / rel
         try:
             sz = p.stat().st_size
             if sz > max_bytes:
-                return rel, sz, None, None
+                return rel, sz, None
             text = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return rel, 0, None, None
-        return rel, sz, _shape_hash(text, p.suffix.lower()), text
+            return rel, 0, None
+        return rel, sz, _shape_hash(text, p.suffix.lower())
 
     clusters: dict[str, list[tuple[str, int]]] = defaultdict(list)
-    texts: dict[str, str] = {}
     unclustered: list[str] = []
     from concurrent.futures import ThreadPoolExecutor
     workers = int(dd.get("io_workers", 16))
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        for rel, sz, h, text in ex.map(_load, candidates):
+        for rel, sz, h in ex.map(_hash, candidates):
             if h is None:
                 unclustered.append(rel)
             else:
                 clusters[h].append((rel, sz))
-                texts[rel] = text
 
     keep: list[str] = list(passthrough) + unclustered
     promoted: list[tuple[str, str]] = []
     dropped: list[str] = []
     cluster_report: list[dict] = []
+
+    # Only large clusters reach the suspicious-set diff, so only THEIR members
+    # need a body. Re-read just that bounded subset (a strict subset of
+    # candidates — singletons / small clusters are never re-read) and retain
+    # only the small normalized suspicious-SET per file, never the body. Peak
+    # body residency is now the thread pool's transient buffers
+    # (~workers x max_file_kb), independent of candidate count.
+    need_sus = [rel for members in clusters.values()
+                if len(members) >= min_cluster for rel, _ in members]
+
+    def _susload(rel: str):
+        p = repo_root / rel
+        try:
+            if p.stat().st_size > max_bytes:
+                return rel, None
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return rel, None
+        return rel, _suspicious_set(text, want_sec, want_ins)
+
+    sus_by_rel: dict[str, set[str]] = {}
+    if need_sus:
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for rel, sus in ex.map(_susload, need_sus):
+                if sus is not None:
+                    sus_by_rel[rel] = sus
 
     # Pass 2 — only large clusters need the (expensive) suspicious-set diff.
     for h, members in clusters.items():
@@ -404,14 +470,19 @@ def _dedup_configs(files: list[str], repo_root: Path, cfg) -> tuple[list[str], d
         rep_set = set(reps.values())
         rep_sus: set[str] = set()
         for r in rep_set:
-            rep_sus |= _suspicious_set(texts[r], want_sec, want_ins)
+            rep_sus |= sus_by_rel.get(r, set())
         keep.extend(rep_set)
 
         c_dropped: list[str] = []
         for rel, _ in members:
             if rel in rep_set:
                 continue
-            sus = _suspicious_set(texts[rel], want_sec, want_ins)
+            if rel not in sus_by_rel:
+                # Body unreadable on re-read (TOCTOU: changed / removed since
+                # Pass 1). Can't prove it's a pure duplicate -> keep it.
+                keep.append(rel)
+                continue
+            sus = sus_by_rel[rel]
             extra = sus - rep_sus
             if extra:
                 keep.append(rel)
@@ -427,7 +498,6 @@ def _dedup_configs(files: list[str], repo_root: Path, cfg) -> tuple[list[str], d
             "dropped": len(c_dropped),
             "sample": members[0][0],
         })
-    texts.clear()
 
     cluster_report.sort(key=lambda c: -c["size"])
     report = {
@@ -802,15 +872,13 @@ Explore the codebase thoroughly, then output the JSON ContextPackage."""
                       if d.is_dir() and d.name not in ("checkpoints",
                                                        "security-scan"))
 
+    ambiguous: list[str] = []   # unprefixed paths matching 2+ top dirs — dropped, not guessed
+
     def _resolve_in_scope(path: str) -> str | None:
-        rel = _norm_rel(repo_root, path)
-        if rel in keep:
-            return rel
-        for td in top_dirs:
-            cand = f"{td}/{rel}"
-            if cand in keep:
-                return cand
-        return None
+        hit, amb = _resolve_scope_path(path, repo_root, keep, top_dirs)
+        if amb:
+            ambiguous.append(path)        # raw agent string — useful in the log
+        return hit
 
     n_sinks_raw = len(data.get("unsafe_sinks") or [])
     n_eps_raw = len(data.get("entry_points") or [])
@@ -835,6 +903,12 @@ Explore the codebase thoroughly, then output the JSON ContextPackage."""
         print(f"  [s1] filtered agent output: -{n_sinks_drop} sinks, "
               f"-{n_eps_drop} entry points (excluded/test/nonexistent paths)",
               file=sys.stderr)
+    if ambiguous:
+        uniq = sorted(set(ambiguous))
+        sample = ", ".join(uniq[:5]) + ("…" if len(uniq) > 5 else "")
+        print(f"  [s1] WARN: dropped {len(ambiguous)} unprefixed path(s) "
+              f"matching 2+ top-level directories (ambiguous — not guessed): "
+              f"{sample}", file=sys.stderr)
 
     data["repo_root"] = repo_root
     # `language` is a required field with no default; on the degraded path

@@ -35,6 +35,51 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 
+def _top_arg(raw: str):
+    """argparse ``type`` for ``--top``: accept a positive integer cap or the
+    ``all`` / ``*`` wildcard (remediate every finding). Reuses the SAME coercion
+    the standalone ``remediate`` command uses so both entry points agree on
+    spellings and error text. Raises ``argparse.ArgumentTypeError`` on a bad
+    value so argparse prints a clean usage error."""
+    from vvaharness.remediation_agent.select import _coerce_top_value
+    try:
+        return _coerce_top_value(raw, source="--top")
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
+def _resolve_auto_step1(flag: bool, cfg,
+                        disable: bool = False) -> tuple[bool, str | None]:
+    """Resolve whether AI auto-exclude (the s1_autoexclude / --auto-step1
+    overlay) runs for this scan.
+
+    Precedence (highest first):
+      1. ``--no-auto-step1`` (``disable=True``) — hard OFF, wins over the flag
+         AND any config default, irrespective of which profile is in use.
+      2. ``--auto-step1`` (``flag=True``) — ON.
+      3. ``step1.auto_exclude`` in config — ON when truthy.
+      4. otherwise OFF.
+
+    Steps 2–3 mirror the OR-precedence ``--remediate`` uses with
+    ``step_remediate.enabled``. The config value is read from the already
+    trust-gated ``cfg`` (an in-target config is refused before load), so this
+    adds no new path for attacker-influenced input to enable a stage.
+
+    Pure helper — callers still apply ``--step1-config`` precedence (which wins
+    over an enabled auto-derivation) and emit the operator-facing messages.
+    Returns ``(enabled, source-label)`` where source-label names what decided
+    it (``None`` when off via default).
+    """
+    if disable:
+        return False, "--no-auto-step1"
+    if flag:
+        return True, "--auto-step1"
+    step1 = getattr(cfg, "step1", None)
+    if bool(getattr(step1, "auto_exclude", False)):
+        return True, "step1.auto_exclude"
+    return False, None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -68,10 +113,24 @@ def main(argv: list[str] | None = None) -> int:
                     help="reuse existing checkpoints for completed steps")
     ap.add_argument("--stop-after",
                     choices=["clone", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
-                             "s8", "s9"],
+                             "s8", "s9", "s10", "s11"],
                     help="stop after the named step (for debugging); "
                          "'clone' stops right after acquiring repos in batch "
                          "mode and implies --keep-clones")
+    ap.add_argument("--remediate", action="store_true",
+                    help="run step 10: the Remediation Agent proposes a fix "
+                         "for each verified finding and writes per-finding "
+                         "artefacts under <repo>/security-remediation/ (also "
+                         "enabled via step_remediate.enabled in config)")
+    ap.add_argument("--top", type=_top_arg, default=None, metavar="N|all",
+                    help="with --remediate: override step_remediate.top_n_findings "
+                         "for this run — remediate only the N highest-CVSS "
+                         "findings (limit & reorder, highest score first), or "
+                         "pass 'all' / '*' to remediate every finding. The "
+                         "profile's top_n_findings is the default cap.")
+    ap.add_argument("--force", action="store_true",
+                    help="override safety refusals (currently: the s10 "
+                         "git-SHA staleness check)")
     ap.add_argument("--skip-preflight", action="store_true",
                     help="skip the startup credential/backend readiness probe "
                          "(does NOT bypass model/API authentication)")
@@ -80,11 +139,20 @@ def main(argv: list[str] | None = None) -> int:
                          "globs, max_file_kb, config_dedup). Lists APPEND to "
                          "config.yaml's step1. Mutually exclusive with "
                          "--auto-step1 (this wins). No implicit default.")
-    ap.add_argument("--auto-step1", action="store_true",
+    auto_grp = ap.add_mutually_exclusive_group()
+    auto_grp.add_argument("--auto-step1", action="store_true",
                     help="after clone, AI-survey each target to derive its "
-                         "step1 overlay; writes {target}/checkpoints/"
+                         "step1 overlay; writes <state>/checkpoints/<run_id>/"
                          "step1.yaml and applies it before s1. Ignored when "
-                         "--step1-config is given.")
+                         "--step1-config is given. Also enabled via "
+                         "step1.auto_exclude in config (on by default in the "
+                         "shipped default profile); this flag forces it on.")
+    auto_grp.add_argument("--no-auto-step1", action="store_true",
+                    help="hard-disable AI auto-exclude for this run, "
+                         "irrespective of step1.auto_exclude in the "
+                         "default/sdk/full profile. Wins over --auto-step1 and "
+                         "any config default. (To also disable it persistently, "
+                         "set step1.auto_exclude: false in your profile.)")
     args = ap.parse_args(argv)
 
     # Trust gate: a config sourced from INSIDE the scan target is attacker-
@@ -107,14 +175,26 @@ def main(argv: list[str] | None = None) -> int:
     cfg_dir = cfg_path.resolve().parent
     cfg_display = "config.yaml" if cfg_path.resolve() == (Path.cwd() / "config.yaml").resolve() else str(cfg_path)
     print(f"  config: {cfg_display}", file=sys.stderr)
-    # Provenance: a config.local.yaml sibling silently overrides the chosen
-    # config — name it so the effective configuration is auditable.
-    _local = cfg_path.with_name("config.local.yaml")
-    if _local.exists():
-        print(f"  config overlay: {_local}", file=sys.stderr)
+    # The config.local.yaml overlay (and the keys it overrides) is logged by
+    # config.load() itself now, uniformly across every command — no separate
+    # provenance print needed here.
     _set_cmdb_path(cfg, cfg_dir)
 
+    # AI auto-exclude is enabled by the --auto-step1 flag OR by
+    # step1.auto_exclude in the (already trust-gated) config, and hard-disabled
+    # by --no-auto-step1 (which wins over both). --step1-config still wins over
+    # an enabled auto-derivation, handled below.
+    args.auto_step1, auto_step1_src = _resolve_auto_step1(
+        args.auto_step1, cfg, disable=args.no_auto_step1)
+    if args.no_auto_step1:
+        print("  step1 overlay: --no-auto-step1 (AI auto-exclude disabled, "
+              "overriding any config default)", file=sys.stderr)
+
     if args.step1_config:
+        if config_mod.is_network_path(args.step1_config):
+            print(f"ERROR: --step1-config must be a local path; refusing "
+                  f"network/UNC path {args.step1_config}", file=sys.stderr)
+            return 2
         s1_path = Path(args.step1_config)
         cfg, s1_applied = config_mod.apply_step1_overlay(cfg, s1_path)
         if not s1_applied:
@@ -126,12 +206,12 @@ def main(argv: list[str] | None = None) -> int:
               f"exts={len(s1.get('exclude_exts') or [])} "
               f"globs={len(s1.get('exclude_globs') or [])})", file=sys.stderr)
         if args.auto_step1:
-            print("  step1 overlay: --step1-config given; ignoring "
-                  "--auto-step1", file=sys.stderr)
+            print(f"  step1 overlay: --step1-config given; ignoring "
+                  f"{auto_step1_src}", file=sys.stderr)
             args.auto_step1 = False
     elif args.auto_step1:
-        print("  step1 overlay: --auto-step1 (per-target "
-              "checkpoints/step1.yaml will be derived)", file=sys.stderr)
+        print(f"  step1 overlay: {auto_step1_src} (per-target "
+              f"checkpoints/step1.yaml will be derived)", file=sys.stderr)
 
     # ── CMDB is OPTIONAL — without it, VulContextSeverity environmental scoring is skipped
     #    (CVSS base scores + OffensivePriority are still computed). Warn, continue.

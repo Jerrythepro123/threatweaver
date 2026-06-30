@@ -27,12 +27,23 @@ applies whichever lens(es) a code chunk matches. Depth varies by lens.
 
 | Skill category | Count | Prompt lines (approx) |
 |---|---|---|
-| Pipeline LLM stages | 7 | ~461 |
+| Scan-pipeline stages (s1–s9) | 9 (7 LLM + s5/s9 deterministic) | ~461 |
 | Specialist security lenses | 6 | ~239 |
-| Language security lenses | 42 | ~385+ |
+| Language security lenses | 42 | ~650 |
 | Threat-model baselines | 5 repo-kinds + STRIDE | 30 items |
 | Shared prompt fragments | 4 | ~89 |
-| **Total distinct security skills** | **~59** | **~1,170+ prompt lines** |
+| Remediation Agent (s10, `remediate` cmd) | 1 LLM skill | 46 ln (4,779 ch) |
+| Validation panel subagents (s11, `validate` cmd) | 2 always-on + 1 conditional | `security-architect` + `penetration-tester` (+ `cross-repo-analyzer`, only on 2+ repo fixes) |
+| **Total distinct scan-side skills** | **~61** | **~1,439 prompt lines** |
+
+(The **61** is the scan-side total: 9 scan-pipeline stages + 6 specialists +
+42 languages + 4 fragments. The prompt-line total (1,439) sums the LLM-stage
+system prompts (461), specialist lenses (239), language lenses (650), and shared
+fragments (89); baseline items are counted separately. Stage numbers run to s11:
+**s10 — Remediate** (the `remediate` command, an LLM skill on `models.remediate`)
+and **s11 — Validate** (the `validate` command's agentic panel) are post-scan
+command stages — listed separately above, not folded into the 61. With the
+default profile both also run automatically at the end of `scan`.)
 
 ---
 
@@ -41,19 +52,48 @@ applies whichever lens(es) a code chunk matches. Depth varies by lens.
 
 | # | Skill | File | Code LOC | System prompt | Purpose |
 |---|---|---|---|---|---|
-| s1 | Pre-process / recon | `s1_preprocess.py` | 855 | 27 ln (1,374 ch) | File inventory, call-graph (LLM seed + regex supplement), entry points & sinks |
+| s1 | Pre-process / recon | `s1_preprocess.py` | 950 | 27 ln (1,374 ch) | File inventory, call-graph (LLM seed + regex supplement), entry points & sinks |
 | s2 | Threat modeling | `s2_threatmodel.py` | 523 | 52 ln (2,766 ch) | STRIDE threats, assets, trust boundaries, baseline checklists |
 | s3 | Decompose | `s3_decompose.py` | 885 | 37 ln (1,617 ch) | Taint chunks, catch-all sweep, specialist scoping |
-| s4 | Deep-dive (discovery) | `s4_deepdive.py` | 726 | 151 ln (8,065 ch) | Per-chunk vulnerability discovery + research lens |
+| s4 | Deep-dive (discovery) | `s4_deepdive.py` | 763 | 151 ln (8,065 ch) | Per-chunk vulnerability discovery + research lens |
 | s5 | Pre-filter | `s5_prefilter.py` | 170 | — (deterministic) | Confidence + evidence gates |
-| s6 | Adversarial verify | `s6_verify.py` | 338 | 92 ln (4,767 ch) | Second-opinion reviewer; false-positive suppression |
+| s6 | Adversarial verify | `s6_verify.py` | 347 | 92 ln (4,767 ch) | Second-opinion reviewer; false-positive suppression |
 | s7 | Dedup | `s7_dedup.py` | 313 | 33 ln (1,630 ch) | Semantic + deterministic dedup |
-| s8 | Exploit-chain | `s8_chain.py` | 449 | 69 ln (2,968 ch) | Multi-hop chains, severity ranking |
+| s8 | Exploit-chain | `s8_chain.py` | 464 | 69 ln (2,968 ch) | Multi-hop chains, severity ranking |
 | s9 | SARIF / CVSS / CWE | `report/enrich.py` | — | — (deterministic) | CVSS 3.1, CWE mapping, SARIF 2.1.0 emit |
 
-An optional **`autoexclude`** role (`s1_autoexclude.py`, 355 LOC) runs ahead of
-s1 when `--auto-step1` is passed: a cheap one-shot survey that derives a
-per-target Step-1 exclusion overlay.
+Two further stages run **after** the scan, each owned by a standalone command —
+and, with the default profile (`step_remediate.enabled` / `step_validate.enabled`),
+also run automatically at the end of `scan` (an 11-step run):
+
+- **s10 — Remediate** (`remediate` command · `vvaharness/remediation_agent/`).
+  An LLM skill on the `models.remediate` role — system prompt **46 ln (4,779 ch)**
+  (`remediation_agent/prompts.py`). It walks the verified findings and proposes a
+  minimal fix per finding, writing per-finding DTOs under
+  `<repo>/security-remediation/`. In fix mode (the in-scan path forces it) it
+  applies the edits to the repo; an opt-in deny-list/playbook policy gate can
+  post-filter forbidden-path edits.
+- **s11 — Validate** (`validate` command · bundled Claude Agent SDK ·
+  `vvaharness/validation/`). A deterministic discovery pass (no model spend) locates DTOs awaiting
+  validation, then an
+  agentic adversarial panel — two always-on personas, a `security-architect` and
+  a `penetration-tester` (the shared exploration brief passed to the panel is
+  augmented with per-CWE bypass cheatsheets from
+  `./inputs/validator_hints.yaml`, available to all personas), plus a conditional `cross-repo-analyzer`
+  spawned only when a fix spans 2+ repositories — scores each fix against weighted
+  gates (root_cause, instance_coverage, no_new_vulnerabilities,
+  security_best_practices) and writes a Fixed / Partially Fixed / Not Fixed /
+  UNVERIFIABLE verdict into the DTO. It runs in the SDK permission sandbox —
+  read-only against the repo, no patch application, no Docker.
+
+An optional **`autoexclude`** role (`s1_autoexclude.py`, 367 LOC) runs ahead of
+s1 when `--auto-step1` is passed **or** when `step1.auto_exclude` is truthy in
+the active profile — and the shipped profiles (`default`, `sdk`, `full`) all set
+`auto_exclude: true`, so it runs by default unless disabled with
+`--no-auto-step1` (which wins over both) or by supplying `--step1-config` (an
+explicit Step-1 overlay also suppresses the auto-derivation). It is a cheap
+one-shot survey that
+derives a per-target Step-1 exclusion overlay.
 
 ## 2. Specialist security lenses
 `vvaharness/lang/hints.py` → `SPECIALIST_HINTS` (selected via `config…step3.specialists`)
@@ -75,7 +115,7 @@ Default-active: `crypto, logic-bug, access-control, batch-etl, iac`.
 
 | Repo kind | Items | Standard |
 |---|---|---|
-| web-api | 10 | OWASP Top 10 (A01–A10) |
+| web-api | 10 | OWASP Top 10 (A01–A05/A07/A08/A10 + XSS, CSRF) |
 | native | 6 | CWE memory-safety (119/787, 416, …) |
 | mobile | 5 | OWASP MASVS / Mobile (M1–M9) |
 | iac | 5 | IaC misconfiguration |
@@ -91,7 +131,7 @@ Dart, Elixir, Erlang, F#, Go, Groovy, Haskell, Java, JavaScript, JCL, Julia,
 Kotlin, Lua, Nim, Objective-C, OCaml, Perl, PHP, PowerShell, Python, R, Ruby,
 Rust, Scala, Shell, Solidity, SQL, Swift, Terraform, TypeScript, VB.NET,
 web-templates, Zig.
-(Richest: python 45 ln, c-cpp 28, java 23, ansible 20. Thinnest: erlang/groovy/lua/scala ≈ 8.)
+(Richest: python 45 ln, c-cpp 28, typescript 25, java 23. Thinnest: scala/erlang/groovy/lua ≈ 8.)
 
 ## 5. Shared prompt fragments
 `vvaharness/util/prompts.py`

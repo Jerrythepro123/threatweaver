@@ -28,6 +28,7 @@ import time
 import itertools
 import json
 import os
+import shutil
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -67,8 +68,21 @@ class _Spinner:
             if self._stop.is_set():
                 break
             el = int(time.time() - self._t0)
-            self._out.write(f"\r\033[K  {_CYAN}{frame}{_RST} {tag}{self._label} "
-                            f"{_DIM}… {el}s{_RST}")
+            # Truncate the label to the terminal width so the whole status
+            # stays on a single visual row. A line that wraps onto a second
+            # row defeats the single-row ``\r\033[K`` rewrite and leaves every
+            # frame behind — that is the spinner "spamming" the terminal.
+            # Lengths are measured on the plain text (no ANSI), which is what
+            # the terminal actually counts toward wrapping.
+            cols = shutil.get_terminal_size((80, 24)).columns
+            prefix = f"  {frame} {tag}"      # visible leading text
+            suffix = f" … {el}s"             # visible trailing text
+            budget = cols - len(prefix) - len(suffix) - 1
+            label = self._label
+            if budget > 1 and len(label) > budget:
+                label = label[: budget - 1] + "…"
+            self._out.write(f"\r\033[K  {_CYAN}{frame}{_RST} "
+                            f"{tag}{label}{_DIM}{suffix}{_RST}")
             self._out.flush()
             self._stop.wait(0.12)
 
@@ -99,13 +113,19 @@ def emit_event(event: str, *, stream=None, **fields) -> None:
 
 @contextmanager
 def stage(label: str, *, n: int | None = None, total: int | None = None,
-          stream=None):
+          stream=None, animate: bool | None = None):
     """Wrap a pipeline stage: emit a start line, time the body, and emit a ✓
     completion line (or a ✗ failure line) before propagating any exception.
 
     Emits pretty ▶/✓/✗ lines by default; when VVAHARNESS_JSON_LOGS is set it
     emits structured JSON events (stage_start / stage_ok / stage_fail) with
     timing instead, so the run is machine-observable.
+
+    `animate` controls the in-place spinner: by default it animates only on an
+    interactive TTY. Pass ``animate=False`` to force the plain one-shot
+    ``▶ … / ✓ …`` lines — use this when the stage body itself writes to the
+    same stream (e.g. a long agentic subprocess), where a live spinner would
+    otherwise interleave with that output and spam the terminal.
 
     Never swallows — the caller's own try/except decides whether a stage
     failure is fatal or degrades gracefully. This only guarantees the operator
@@ -114,7 +134,9 @@ def stage(label: str, *, n: int | None = None, total: int | None = None,
     out = stream if stream is not None else sys.stderr
     tag = f"[{n}/{total}] " if n is not None and total is not None else ""
     as_json = json_logs_enabled()
-    animate = not as_json and _is_tty(out)   # live spinner only on an interactive terminal
+    # Live spinner only on an interactive terminal, unless the caller overrides.
+    auto_animate = _is_tty(out)
+    animate = (auto_animate if animate is None else animate) and not as_json
     t0 = time.time()
     spin = None
     if as_json:
@@ -137,6 +159,10 @@ def stage(label: str, *, n: int | None = None, total: int | None = None,
             x = f"{_RED}✗{_RST}" if animate else "✗"
             print(f"  {x} {tag}{label} — failed after {dt:.1f}s: "
                   f"{redact(f'{type(e).__name__}: {e}')}", file=out, flush=True)
+        # Blank line so consecutive [n/total] stage blocks are visually
+        # separated in the log (skipped in JSON mode — one object per line).
+        if not as_json:
+            print(file=out, flush=True)
         raise
     else:
         dt = round(time.time() - t0, 2)
@@ -150,3 +176,7 @@ def stage(label: str, *, n: int | None = None, total: int | None = None,
                   file=out, flush=True)
         else:
             print(f"  ✓ {tag}{label} ({dt:.1f}s)", file=out, flush=True)
+        # Blank line so consecutive [n/total] stage blocks are visually
+        # separated in the log (skipped in JSON mode — one object per line).
+        if not as_json:
+            print(file=out, flush=True)

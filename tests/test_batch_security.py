@@ -36,3 +36,47 @@ def test_parse_repo_file_rejects_option_shaped_ref(tmp_path):
     with pytest.raises(ValueError) as ei:
         batch._parse_repo_file(lst)
     assert "may not start with '-'" in str(ei.value)
+
+
+# ── Manifest size guards (availability: no unbounded materialization) ─────────
+# Both parsers must reject an oversized manifest BEFORE decoding the whole file
+# into memory — a byte cap on stat().st_size and a row/line cap during the
+# stream. The manifest is operator-supplied (single-tenant), so this guards an
+# accidental/runaway file, not a hostile party.
+@pytest.mark.parametrize("name,write,parse", [
+    ("repos.csv",
+     lambda p: p.write_text("AppID,RepoName,Path\n" + "a,r,https://h/o/r.git\n" * 5,
+                            encoding="utf-8"),
+     lambda p: batch._parse_repo_csv(p, None)),
+    ("repos.txt",
+     lambda p: p.write_text("a,r,https://h/o/r.git\n" * 5, encoding="utf-8"),
+     lambda p: batch._parse_repo_file(p)),
+])
+def test_parser_rejects_oversized_manifest_before_decode(tmp_path, monkeypatch,
+                                                         name, write, parse):
+    monkeypatch.setattr(batch, "_MANIFEST_MAX_BYTES", 16)
+    lst = tmp_path / name
+    write(lst)
+    with pytest.raises(ValueError) as ei:
+        parse(lst)
+    assert "cap" in str(ei.value)
+
+
+@pytest.mark.parametrize("name,write,parse,token", [
+    ("repos.csv",
+     lambda p: p.write_text("AppID,RepoName,Path\n"
+                            + "".join(f"a{i},r{i},https://h/o/r{i}.git\n" for i in range(8)),
+                            encoding="utf-8"),
+     lambda p: batch._parse_repo_csv(p, None), "data rows"),
+    ("repos.txt",
+     lambda p: p.write_text("".join(f"a{i},r{i},https://h/o/r{i}.git\n" for i in range(8)),
+                            encoding="utf-8"),
+     lambda p: batch._parse_repo_file(p), "lines"),
+])
+def test_parser_rejects_too_many_rows(tmp_path, monkeypatch, name, write, parse, token):
+    monkeypatch.setattr(batch, "_MANIFEST_MAX_ROWS", 3)
+    lst = tmp_path / name
+    write(lst)
+    with pytest.raises(ValueError) as ei:
+        parse(lst)
+    assert token in str(ei.value)

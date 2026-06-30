@@ -34,6 +34,8 @@ Reference docs:
 | [Architecture](architecture.md) | Module map & data flow |
 | [Operational Security](security.md) | Isolation, redaction, data egress |
 | [Skills](SKILLS.md) | Security-analysis lenses built into the pipeline |
+| [Remediation](remediation.md) | The `remediate` command (step 10) — fix generation |
+| [Validation](validation.md) | The `validate` / `s11` command (step 11) — agentic fix grading |
 
 Features & combinations:
 

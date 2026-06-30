@@ -38,7 +38,9 @@ def _rmtree_rw(path: Path) -> None:
     shutil.rmtree(path, onerror=_on_err)
 
 
-_CLONE_KEEP_DEFAULT = ("checkpoints", "security-scan")
+# Checkpoints no longer live under the cloned repo, so only the report output
+# dir is preserved on cleanup.
+_CLONE_KEEP_DEFAULT = ("security-scan",)
 
 
 def _preserve_set(cfg) -> set[str]:
@@ -48,8 +50,9 @@ def _preserve_set(cfg) -> set[str]:
 
 def _purge_clone(root: Path, keep: set[str]) -> None:
     """Delete the cloned source under `root` but PRESERVE the named artifact
-    folders (checkpoints/, security-scan/). Replaces a blanket rmtree so the
-    scan outputs survive clone cleanup.
+    folders (security-scan/ by default). Replaces a blanket rmtree so the
+    scan outputs survive clone cleanup. Checkpoints live in
+    $VVAHARNESS_STATE_DIR, not the clone, so they are unaffected.
 
     Grouped mode: each repo is a subfolder of `root` → repos go, artifacts stay.
     Single mode:  source files sit alongside the artifact folders inside `root`

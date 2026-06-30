@@ -667,9 +667,10 @@ def test_agentic_preflight_applies_configured_effort(monkeypatch):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# allowedTools — Bash is CLI-native and must always be permitted in CLI mode,
-# even when a profile's allowed_tools omits it (the sdk/openai backends have no
-# Bash executor, so this augmentation is correct only here).
+# allowedTools — the caller's allowlist is honoured AS-GIVEN. Bash is NEVER
+# auto-added: a hostile target repo can prompt-inject the agent via files it
+# Reads/Greps, and a force-granted shell would turn that into RCE on the
+# scanning host. Operators who need Bash list it explicitly.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _allowed_tools(cmd):
@@ -683,21 +684,21 @@ def _allowed_tools(cmd):
     return out
 
 
-def test_agentic_auto_adds_bash_when_omitted(monkeypatch):
+def test_agentic_honours_allowed_tools_verbatim(monkeypatch):
     captured = _capture_cmd(monkeypatch)
     claude_cli.agentic("hi", model="m", cwd=".",
                        allowed_tools=["Read", "Glob", "Grep"])
     tools = _allowed_tools(captured["cmd"])
-    assert "Bash" in tools
-    # configured tools preserved and ordered first.
-    assert tools[:3] == ["Read", "Glob", "Grep"]
+    assert tools == ["Read", "Glob", "Grep"]
+    assert "Bash" not in tools
 
 
-def test_agentic_does_not_duplicate_bash(monkeypatch):
+def test_agentic_passes_bash_only_when_caller_lists_it(monkeypatch):
     captured = _capture_cmd(monkeypatch)
     claude_cli.agentic("hi", model="m", cwd=".",
                        allowed_tools=["Read", "Bash", "Grep"])
     tools = _allowed_tools(captured["cmd"])
+    assert tools == ["Read", "Bash", "Grep"]
     assert tools.count("Bash") == 1
 
 def _fake_caps(monkeypatch, *, max_turns):
@@ -748,3 +749,35 @@ def test_prompt_uses_json_and_no_verbose(monkeypatch):
     assert "--verbose" not in cmd
     oi = cmd.index("--output-format")
     assert cmd[oi + 1] == "json"
+
+
+# ── claude executable resolution (CWE-426/427: no bare-name PATH exec) ───────
+
+def test_find_claude_cmd_honors_existing_override(monkeypatch, tmp_path):
+    binpath = tmp_path / "claude"
+    binpath.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setenv("VVAHARNESS_CLAUDE_BINARY", str(binpath))
+    assert claude_cli._find_claude_cmd() == [str(binpath)]
+
+
+def test_find_claude_cmd_missing_override_falls_back(monkeypatch):
+    monkeypatch.setenv("VVAHARNESS_CLAUDE_BINARY", "/no/such/claude-xyz")
+    monkeypatch.setattr(claude_cli.os, "name", "posix")
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda n: "/usr/bin/claude")
+    # bogus override is NOT used; falls back to the PATH-resolved abs path
+    assert claude_cli._find_claude_cmd() == ["/usr/bin/claude"]
+
+
+def test_find_claude_cmd_pins_abs_path_no_override(monkeypatch):
+    monkeypatch.delenv("VVAHARNESS_CLAUDE_BINARY", raising=False)
+    monkeypatch.setattr(claude_cli.os, "name", "posix")
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda n: "/opt/bin/claude")
+    # Unix: absolute resolved path, NOT the bare name
+    assert claude_cli._find_claude_cmd() == ["/opt/bin/claude"]
+
+
+def test_find_claude_cmd_bare_fallback_when_unresolvable(monkeypatch):
+    monkeypatch.delenv("VVAHARNESS_CLAUDE_BINARY", raising=False)
+    monkeypatch.setattr(claude_cli.os, "name", "posix")
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda n: None)
+    assert claude_cli._find_claude_cmd() == ["claude"]   # last-resort, with warning

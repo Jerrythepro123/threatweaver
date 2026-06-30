@@ -229,9 +229,10 @@ def test_get_client_no_http_client_when_verify_true(monkeypatch):
     assert client.kw["api_key"] == "sk-ant-EXAMPLE"
 
 
-def test_get_client_uses_httpx_client_when_verify_false(monkeypatch):
+def test_get_client_uses_httpx_client_when_verify_false(monkeypatch, capsys):
     _install_fake_openai(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-ant-EXAMPLE")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.internal/v1")
     # Avoid importing real urllib3 warning machinery: patch warnings module use
     # by configuring verify_ssl=False which triggers the urllib3 import branch.
     oai.configure(verify_ssl=False)
@@ -239,6 +240,10 @@ def test_get_client_uses_httpx_client_when_verify_false(monkeypatch):
     assert "http_client" in client.kw
     assert isinstance(client.kw["http_client"], _FakeHttpxClient)
     assert client.kw["http_client"].verify is False
+    # Disabling TLS must NEVER be silent: a loud, endpoint-naming warning fires.
+    err = capsys.readouterr().err
+    assert "TLS verification DISABLED" in err
+    assert "gateway.internal" in err
 
 
 def test_get_client_uses_httpx_client_with_ca_cert(monkeypatch, tmp_path):

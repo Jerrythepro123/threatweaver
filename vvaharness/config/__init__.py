@@ -16,10 +16,17 @@
 from __future__ import annotations
 import os
 import re
-from pathlib import Path
+import sys
+from pathlib import Path, PureWindowsPath
 import yaml
 
 _ENV_PAT = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
+
+# Overlay paths already announced this process — load() is called several times
+# per run (manifest capture, orchestrator, doctor, …); dedupe so the
+# config.local.yaml provenance line is emitted once per unique overlay, not once
+# per load() call.
+_logged_overlays: set[str] = set()
 
 
 def _expand_env(m):
@@ -47,7 +54,7 @@ class Config:
         self._data = data
 
     def __getattr__(self, name):
-        # Guard against recursion during copy/pickle: _data and dunder probes
+        # Guard against recursion during copy.deepcopy: _data and dunder probes
         # (__deepcopy__, __setstate__, __getstate__, ...) must NOT re-enter via
         # self._data, which is absent while the object is being reconstructed.
         if (name.startswith("__") and name.endswith("__")) or name == "_data":
@@ -105,7 +112,11 @@ _STEP_DEFAULTS: dict = {
         "specialist_chunk_loc": 10000,
     },
     "step4": {
-        "parallel": 5, "timeout": 1800, "runs": 4, "vote_threshold": 3,
+        # Single-pass by default — matches every shipped profile. Majority
+        # voting is an explicit opt-in: set runs>1 AND point models.deepdive at
+        # a temperature-capable sdk/openai model, else _effective_runs() (see
+        # s4_deepdive) forces 1/1.
+        "parallel": 5, "timeout": 1800, "runs": 1, "vote_threshold": 1,
         "specialist_runs": 1, "line_bucket": 10, "max_findings_per_run": 10,
         "max_tokens": 64000, "neighbor_context_lines": 25,
         "neighbor_context_max": 50,
@@ -117,6 +128,9 @@ _STEP_DEFAULTS: dict = {
     },
     "step7_dedup": {"line_tolerance": 3, "semantic": True, "max_tokens": 64000},
     "step8": {"max_tokens": 64000, "timeout": 3600},
+    "step_remediate": {"max_budget_usd": 10.0, "max_turns": 40,
+                       "top_n_findings": 20},
+    "step_validate": {"enabled": False, "effort": "high", "max_turns": 50, "max_budget_usd": 15.0, "max_findings": 20},
 }
 
 
@@ -130,14 +144,38 @@ def load(path: str | Path = "config.yaml") -> Config:
     # Fill any missing scalar step-knobs from the built-in defaults so partial
     # configs never crash a stage. User-supplied values take precedence.
     raw = _deep_merge(_STEP_DEFAULTS, raw)
-    # config.local.yaml (git-ignored, never bundled) overrides matching keys.
+    # config.local.yaml (git-ignored, never bundled) deep-merges OVER the chosen
+    # config. It can override security-relevant keys (model routing, sdk/openai
+    # base_url, TLS ca_cert, tool permissions), so the merge is made VISIBLE
+    # rather than silent: log the overlay file and the top-level keys it
+    # overrides, on every command (not just scan). Set VVAHARNESS_NO_LOCAL_CONFIG
+    # (to any value) to skip the overlay entirely — for a reproducible run that
+    # honours only the operator-selected config. The overlay resolves next to
+    # the --config path (operator-controlled), never the scanned target.
     local = p.with_name("config.local.yaml")
     if local.exists():
-        over = yaml.safe_load(local.read_text(encoding="utf-8")) or {}
-        if not isinstance(over, dict):
-            raise ValueError(f"config {local} must be a YAML mapping, got {type(over).__name__}")
-        raw = _deep_merge(raw, over)
-    return Config(_expand(raw))
+        key = str(local.resolve())
+        if os.environ.get("VVAHARNESS_NO_LOCAL_CONFIG"):
+            if key not in _logged_overlays:
+                _logged_overlays.add(key)
+                print(f"  config overlay: {local} present but SKIPPED "
+                      f"(VVAHARNESS_NO_LOCAL_CONFIG set)", file=sys.stderr)
+        else:
+            over = yaml.safe_load(local.read_text(encoding="utf-8")) or {}
+            if not isinstance(over, dict):
+                raise ValueError(f"config {local} must be a YAML mapping, got {type(over).__name__}")
+            if key not in _logged_overlays:
+                _logged_overlays.add(key)
+                overrides = ", ".join(sorted(map(str, over))) or "(empty)"
+                print(f"  config overlay: {local} applied "
+                      f"(overrides: {overrides})", file=sys.stderr)
+            raw = _deep_merge(raw, over)
+    cfg = Config(_expand(raw))
+    # Record the directory the config was loaded from so input-style paths
+    # (e.g. inject.cve_file, step_remediate.policy_file) can be resolved
+    # against it — exactly how scan.py resolves cfg.inject.* against cfg_dir.
+    cfg._data["_config_dir"] = str(p.resolve().parent)
+    return cfg
 
 
 def _replace_merge(base: dict, over: dict) -> dict:
@@ -171,12 +209,32 @@ def _append_merge(base: dict, over: dict) -> dict:
     return out
 
 
+def is_network_path(path: str | Path) -> bool:
+    """True if *path* is a UNC / network location (``\\\\host\\share`` or
+    ``//host/share``). Reading such a path on Windows triggers SMB
+    authentication, which transmits the caller's NTLMv2 hash to the (possibly
+    attacker-controlled) host. Callers must refuse these before any filesystem
+    access. Evaluated with PureWindowsPath so the result is identical on every
+    OS, not just where the run happens to land."""
+    s = str(path).strip()
+    if s.startswith("\\\\") or s.startswith("//"):
+        return True
+    # UNC drives render as '\\host\share'; local drives render as 'C:'.
+    return PureWindowsPath(s).drive.startswith("\\\\")
+
+
 def apply_step1_overlay(cfg: Config, path: str | Path) -> tuple[Config, bool]:
     """Layer a per-scan step1 file on top of cfg.step1. Accepts either a
     bare-key file (exclude_dirs:, exclude_exts:, …) or one wrapped in a
     top-level `step1:` block. Lists append; scalars replace. Returns
     (cfg, applied)."""
     p = Path(path)
+    # Refuse network/UNC paths before the first filesystem touch (is_file
+    # below) — on Windows that touch would leak the user's NTLM hash via SMB.
+    if is_network_path(p):
+        raise ValueError(
+            f"step1 overlay must be a local path; refusing network/UNC path {p!r} "
+            f"(reading it could leak credentials over SMB)")
     if not p.is_file():
         return cfg, False
     over = yaml.safe_load(p.read_text(encoding="utf-8")) or {}

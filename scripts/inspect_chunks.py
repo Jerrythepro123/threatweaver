@@ -21,32 +21,32 @@ Usage:
   python inspect_chunks.py --repo <target> --json manifest.json
 
 Run the pipeline with `--stop-after s3` first so the checkpoints exist.
+Checkpoints are stored in the SQLite state DB at
+``$VVAHARNESS_STATE_DIR/vvaharness.db`` (default ``~/.vvaharness/state/…``),
+NOT inside the target repo.
 """
 from __future__ import annotations
 import argparse
 import json
-import pickle
+import os
 import sys
 from collections import deque
 from pathlib import Path
 
-# Pickles reference models.* — ensure project root is importable when this
-# script is launched from elsewhere.
-
 import vvaharness.models as models  # noqa: F401
+# Reuse the package's checkpoint loader (SQLite-backed, schema-validating)
+# rather than a local one.
+from vvaharness.orchestrator.checkpoints import load_ckpt, run_id_for
+from vvaharness.orchestrator import store
 
 
-def _latest_ckpt(ckpt_dir: Path, step: str) -> Path | None:
-    hits = sorted(ckpt_dir.glob(f"*_{step}.pkl"), key=lambda p: p.stat().st_mtime)
-    return hits[-1] if hits else None
-
-
-def _load(ckpt_dir: Path, step: str, run_id: str | None):
-    p = (ckpt_dir / f"{run_id}_{step}.pkl") if run_id else _latest_ckpt(ckpt_dir, step)
-    if not p or not p.exists():
-        return None, None
-    with open(p, "rb") as f:
-        return pickle.load(f), p
+def _avail_runs() -> list[tuple[str, str | None]]:
+    con = store.connect()
+    try:
+        return list(con.execute(
+            "SELECT run_id, repo_root FROM runs ORDER BY updated_at DESC"))
+    finally:
+        con.close()
 
 
 def _count_loc(p: Path) -> int:
@@ -81,8 +81,13 @@ def _bfs_reaches(start: str, graph: dict, sinks: set[str], max_hops: int) -> set
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--repo", required=True, help="target repo (contains checkpoints/)")
-    ap.add_argument("--run-id", help="specific run id; default = most recent")
+    ap.add_argument("--repo", required=True, help="target repo that was scanned")
+    ap.add_argument("--run-id",
+                    help="explicit run id; default = derived from --repo path "
+                         "(must match the absolute path the scan ran against)")
+    ap.add_argument("--state-dir",
+                    help="state root containing vvaharness.db; default = "
+                         "$VVAHARNESS_STATE_DIR or ~/.vvaharness/state")
     ap.add_argument("--file", help="show which chunk(s) contain this file")
     ap.add_argument("--json", nargs="?", const="-",
                     help="dump TaskManifest as JSON (to path, or stdout if bare)")
@@ -91,22 +96,29 @@ def main() -> int:
     args = ap.parse_args()
 
     repo = Path(args.repo).resolve()
-    ckpt_dir = repo / "checkpoints"
-    if not ckpt_dir.is_dir():
-        print(f"error: no checkpoints/ under {repo}", file=sys.stderr)
-        return 1
+    if args.state_dir:
+        os.environ["VVAHARNESS_STATE_DIR"] = args.state_dir
+    run_id = args.run_id or run_id_for(repo)
 
-    ctx, ctx_p = _load(ckpt_dir, "s1", args.run_id)
-    tm, _ = _load(ckpt_dir, "s2", args.run_id)
-    manifest, man_p = _load(ckpt_dir, "s3", args.run_id)
+    ctx = load_ckpt(None, run_id, "s1")
+    tm = load_ckpt(None, run_id, "s2")
+    manifest = load_ckpt(None, run_id, "s3")
     if ctx is None or manifest is None:
-        print(f"error: missing s1/s3 checkpoint in {ckpt_dir} "
-              f"(run pipeline with --stop-after s3 first)", file=sys.stderr)
+        avail = _avail_runs()
+        listing = ("\n    ".join(f"{r}  {root or ''}" for r, root in avail)
+                   if avail else "<none>")
+        print(f"error: missing s1/s3 checkpoint for run_id {run_id} in "
+              f"{store.db_path()}\n"
+              f"  (run pipeline with --stop-after s3 first; run_id is SHA-256\n"
+              f"   of the scanned repo's absolute path — if the scan ran\n"
+              f"   against a different path, pass --run-id explicitly)\n"
+              f"  available run_ids:\n    " + listing,
+              file=sys.stderr)
         return 1
 
     print(f"# Inspect — {repo.name}")
-    print(f"  ctx:      {ctx_p.name}")
-    print(f"  manifest: {man_p.name}\n")
+    print(f"  db:      {store.db_path()}")
+    print(f"  run_id:  {run_id}\n")
 
     # ── ContextPackage summary ───────────────────────────────────────────
     cg = ctx.call_graph or {}
@@ -149,22 +161,22 @@ def main() -> int:
     # repo was scanned elsewhere (e.g. an orchestrator clone that has since
     # been purged or relocated), those paths no longer resolve and every chunk
     # would silently report 0 LOC. Prefer the live --repo the user passed,
-    # falling back to the pickled scan-time root only if chunk files don't
+    # falling back to the recorded scan-time root only if chunk files don't
     # exist under --repo.
-    pickled_root = Path(ctx.repo_root)
+    scan_root = Path(ctx.repo_root)
     loc_root = repo
     # Decide which root resolves chunk files; warn if neither does.
     probe_files = [f for c in manifest.sorted_chunks() for f in c.files][:25]
     live_hits = sum(1 for f in probe_files if (repo / f).exists())
-    pickled_hits = sum(1 for f in probe_files if (pickled_root / f).exists())
-    if probe_files and live_hits == 0 and pickled_hits > 0:
-        loc_root = pickled_root
+    scan_hits = sum(1 for f in probe_files if (scan_root / f).exists())
+    if probe_files and live_hits == 0 and scan_hits > 0:
+        loc_root = scan_root
         print(f"  [warn] chunk files not found under --repo {repo}; "
-              f"using pickled scan-time root {pickled_root} for LOC",
+              f"using recorded scan-time root {scan_root} for LOC",
               file=sys.stderr)
-    elif probe_files and live_hits == 0 and pickled_hits == 0:
+    elif probe_files and live_hits == 0 and scan_hits == 0:
         print(f"  [warn] chunk files resolve under neither --repo {repo} nor "
-              f"pickled scan-time root {pickled_root}; LOC will read 0",
+              f"recorded scan-time root {scan_root}; LOC will read 0",
               file=sys.stderr)
     repo_root = loc_root
     chunks = manifest.sorted_chunks()

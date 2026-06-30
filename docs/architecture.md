@@ -22,25 +22,47 @@ Module map and data flow for the `vvaharness` package.
 
 ```
 vvaharness/
-  cli.py              — console entry point: setup / doctor / estimate / scan; loads .env,
-                        checks the Python floor, resolves --config
+  cli.py              — console entry point: setup / doctor / estimate / gc /
+                        scan / remediate / validate;
+                        loads .env, checks the Python floor, resolves --config
   orchestrator/       — pipeline driver package:
                         entry.py (argparse + main), scan.py (single-repo driver),
                         batch.py (clone + group-by-app), preflight.py (backend
-                        configure/probe), checkpoints.py, cleanup.py, cmdb.py,
+                        configure/probe), checkpoints.py, store.py (SQLite
+                        state store), cleanup.py, cmdb.py,
                         enrich_findings.py, config_paths.py
-  agentdoc.py         — AGENTS.md / CLAUDE.md / skill text for `setup --install-agents`
-  manifest.py         — run-level run_manifest.json (version, roles, config hash, timing)
+  agentdoc.py         — AGENTS.md / CLAUDE.md / .github/copilot-instructions.md /
+                        GEMINI.md / Claude skill text for `setup --install-agents`
+  manifest.py         — run-level run_manifest.json (version, roles, config hash, target git SHA, timing)
   models.py           — pydantic data contracts (ContextPackage, Finding, FinalReport, …)
   config/             — config loader (${ENV} expansion, local override, step1 overlays)
     profiles/         — bundled profiles: default.yaml (all-CLI, Read/Glob/Grep),
-                        cli.yaml (all-CLI + Bash), full.yaml (multi-backend)
-  pipeline/stages/    — the analysis stages:
+                        sdk.yaml (all-SDK, s4 voting on), full.yaml (multi-backend)
+  pipeline/stages/    — the scan analysis stages:
                         s1_preprocess, s1_autoexclude, s2_threatmodel, s3_decompose,
-                        s4_deepdive, s5_prefilter, s6_verify, s7_dedup, s8_chain
+                        s4_deepdive, s5_prefilter, s6_verify, s7_dedup, s8_chain,
+                        s11_validate (thin wrapper hooking the validation/ package
+                        into the pipeline)
+  remediation_agent/  — Step 10 (the `remediate` command / --remediate): proposes
+                        and applies a minimal fix per verified finding and writes
+                        per-finding DTOs under <repo>/security-remediation/
+  validation/         — Step 11 (the `validate` command; uses the bundled Claude
+                        Agent SDK): DTO discovery (no model spend) feeds the s11
+                        agentic panel — a Claude Agent SDK panel of two always-on
+                        personas (security-architect + penetration-tester) plus a
+                        conditional cross-repo-analyzer (spawned only when a fix
+                        spans 2+ repos) that scores each DTO against weighted
+                        fix-quality gates inside the SDK permission sandbox
+  (operator input)    — ./inputs/validator_hints.yaml (per-CWE bypass cheatsheets
+                        injected into the validation session launch prompt)
   backends/           — LLM transport layer:
                         llm.py        — dispatcher; routes on `via:`
                         sdk.py        — Anthropic Python SDK
+                        agent_sdk.py  — Claude Agent SDK backend for the mutating
+                                        remediation `fix` role (delegated to from
+                                        sdk.py under `via: sdk`); native
+                                        Read/Glob/Grep/Edit/Write inside a
+                                        deny-by-default (no-Bash) permission sandbox
                         oai.py        — OpenAI-compatible API
                         claude_cli.py — `claude` CLI subprocess
                         localtools.py — sandboxed Read/Glob/Grep tool-loop for sdk/openai
@@ -51,7 +73,8 @@ vvaharness/
                         prompts, json_extract, status (progress spinner)
   lang/               — language hints (EXT_TO_LANG, LANG_HINTS, SPECIALIST_HINTS)
 
-inputs/               — example context inputs (*.example.*)
+inputs/               — context inputs: *.example.* samples plus operator-editable
+                        validator_hints.yaml / remediation_policy.yaml / remediation_playbook.yaml
 scripts/              — developer helper scripts (not part of the installed package)
 tests/                — smoke tests
 ```
@@ -63,7 +86,7 @@ tests/                — smoke tests
                               │
    s1 preprocess  ── repo survey, call graph ─────────► ContextPackage
    s2 threatmodel ── assets, trust boundaries, threats ─► ThreatModel
-   s3 decompose   ── risk/taint/specialist chunks ─────► TaskManifest
+   s3 decompose   ── risk/taint/catch-all/specialist chunks ► TaskManifest
    s4 deepdive    ── per-chunk findings (×N + vote) ───► Finding[]
    s5 prefilter   ── deterministic confidence/evidence gates
    s6 verify      ── adversarial TRUE/FALSE_POSITIVE + CVSS per finding
@@ -75,8 +98,28 @@ tests/                — smoke tests
                           + <module>_<ts>_errors.jsonl
 ```
 
-Each stage checkpoints to `<target>/checkpoints/`; `vvaharness scan --resume`
-skips completed stages. The whole run is summarised in `run_manifest.json`.
+The standalone `vvaharness validate` command runs separately, over the
+remediation DTOs the `remediate` command leaves under
+`<repo>/security-remediation/<NN_slug>/remediate_report.json`:
+
+```
+   remediation DTOs (status: awaiting_validation, finding + patch.diff)
+                              │
+   discover       ── locate DTOs awaiting validation (no model spend)
+   s11 panel      ── Claude Agent SDK adversarial panel — two always-on personas
+                     (security-architect + penetration-tester) plus a conditional
+                     cross-repo-analyzer (only when a fix spans 2+ repos) →
+                     weighted gate scores → verdict
+                              │
+       each DTO's `validation` block filled; status → validated | validation_failed
+              | needs_review  (+ validation_report.json, synthesized_gates.json)
+```
+
+Each stage checkpoints to the SQLite state DB at
+`$VVAHARNESS_STATE_DIR/vvaharness.db` (default `~/.vvaharness/state/…`) —
+never inside the scanned repo; `vvaharness scan --resume` skips completed
+stages. `vvaharness gc` prunes old runs. The whole run is summarised in
+`run_manifest.json`.
 
 ## LLM transport layer
 
@@ -104,7 +147,7 @@ CLI's native tools (including Bash). Roles are swapped in config alone — see
   are Luhn+IIN gated and SSNs area/group/serial gated for precision; values
   following a strong credential keyword (`password`, `api_key`, `access_key`,
   `client_secret`, `auth_token`) are always masked, while a short lowercase word
-  after a prose-ambiguous keyword (`secret`, `token`) is left as ordinary text.
+  after a prose-ambiguous keyword (`secret`, `token`, `credential`) is left as ordinary text.
 - **Token & cost accounting** (`util/tokens.py`, `util/metrics.py`): per-stage
   buckets feed the run summary and the `step*.max_budget_usd` caps.
 - **Error log** (`util/errlog.py`): non-fatal errors are appended to the

@@ -233,7 +233,7 @@ def test_get_client_no_http_client_when_verify_true(monkeypatch):
     assert captured["httpx_kw"] is None
 
 
-def test_get_client_builds_http_client_when_verify_false(monkeypatch):
+def test_get_client_builds_http_client_when_verify_false(monkeypatch, capsys):
     mod, captured = _make_fake_anthropic()
     monkeypatch.setattr(sdk, "anthropic", mod)
     monkeypatch.setenv("ANTHROPIC_SDK_API_KEY", "sk-ant-EXAMPLE")
@@ -243,9 +243,14 @@ def test_get_client_builds_http_client_when_verify_false(monkeypatch):
                             exceptions=types.SimpleNamespace(
                                 InsecureRequestWarning=Warning)))
     sdk._cfg["verify_ssl"] = False
+    sdk._cfg["base_url"] = "https://gateway.internal"
     sdk._get_client()
     assert "http_client" in captured["anthropic_kw"]
     assert captured["httpx_kw"] == {"verify": False, "cert": None}
+    # Disabling TLS must NEVER be silent: a loud, endpoint-naming warning fires.
+    err = capsys.readouterr().err
+    assert "TLS verification DISABLED" in err
+    assert "gateway.internal" in err
 
 
 def test_get_client_builds_http_client_for_client_cert(monkeypatch, tmp_path):
@@ -262,7 +267,7 @@ def test_get_client_builds_http_client_for_client_cert(monkeypatch, tmp_path):
     assert captured["httpx_kw"]["cert"] == str(cert)
 
 
-def test_get_client_ca_cert_path_used_as_verify(monkeypatch, tmp_path):
+def test_get_client_ca_cert_path_used_as_verify(monkeypatch, tmp_path, capsys):
     mod, captured = _make_fake_anthropic()
     monkeypatch.setattr(sdk, "anthropic", mod)
     monkeypatch.setenv("ANTHROPIC_SDK_API_KEY", "sk-ant-EXAMPLE")
@@ -272,6 +277,8 @@ def test_get_client_ca_cert_path_used_as_verify(monkeypatch, tmp_path):
     sdk._get_client()
     # ca_cert path wins over verify_ssl -> passed as verify=<path>.
     assert captured["httpx_kw"]["verify"] == str(ca)
+    # Secure path (a CA bundle) must NOT emit the insecure-TLS warning.
+    assert "TLS verification DISABLED" not in capsys.readouterr().err
 
 
 def test_get_client_missing_ca_cert_falls_back(monkeypatch, capsys):

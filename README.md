@@ -18,13 +18,18 @@ limitations under the License.
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Python](https://img.shields.io/badge/python-%E2%89%A5%203.10-blue.svg)
-![Version](https://img.shields.io/badge/version-1.0.0-informational.svg)
+![Version](https://img.shields.io/badge/version-1.1.0-informational.svg)
 ![Output](https://img.shields.io/badge/output-Markdown%20%2B%20SARIF%202.1.0-green.svg)
 
 VVAH is Visa's open-source harness for autonomous vulnerability discovery
 using frontier AI models, built on learnings from
 [Project Glasswing](https://www.anthropic.com/glasswing) (Anthropic's
 initiative for AI-assisted vulnerability research).
+
+VVAH runs in two phases. **Phase 1 — Detection** (`scan`, stages S1–S9) finds and
+reports issues. **Phase 2 — Remediation & Validation** (S10–S11, on by default)
+then **proposes a fix** per finding (`remediate`) and **validates** those fixes with
+an adversarial panel (`validate`).
 
 Three design choices drive finding quality: threat modeling before analysis
 focuses the attack surface; multi-agent deterministic voting reduces false
@@ -49,38 +54,81 @@ accepting external contributions; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ---
 
+## Quick start
+
+```bash
+pip install .                                          # venv / pipx options under Install
+vvaharness doctor                                      # check credentials & backends
+vvaharness estimate --repo /path/to/target             # rough scope/cost — spends nothing
+vvaharness scan --repo /path/to/target --stop-after s9 # detection only — no code changes
+```
+
+> ⚠️ **A plain `scan` edits your code.** The shipped default profile continues past detection into
+> remediation _fix mode_, which **edits source files in the target repo**. Add `--stop-after s9` for
+> detection only (no code changes).
+
+New here? Follow [Install](#install) → [Configure](#configure) → [Run](#run).
+
+---
+
 ## Pipeline
 
-Three phases, nine stages. Each stage combines deterministic controls with
-frontier-model reasoning to produce structured, exploit-validated findings.
+**Phase 1 — Detection (`scan`, S1–S9).** Nine stages combine deterministic
+controls with frontier-model reasoning to produce structured, exploit-validated
+findings:
 
-| Phase | Stages | Purpose |
+| Stage group | Stages | Purpose |
 |---|---|---|
 | Discovery & Modeling | S1–S3 | Attack surface mapping, threat modeling, hunting plan |
 | Deep Dive & Verification | S4–S6 | Multi-lens research, policy gates, adversarial verification |
 | Synthesis, Chaining & Reporting | S7–S9 | Deduplication, chain construction, SARIF emission |
 
-Standardized inputs (batch repositories, GitHub Enterprise metadata, CMDB
-records, CVE and control feeds) flow in. Structured reports, SARIF artifacts,
-and API-ready findings flow out.
+**Phase 2 — Remediation & Validation (S10–S11, on by default).** After detection,
+the shipped `default.yaml` runs two more steps. The three core commands map cleanly
+to the workflow:
 
-See [`docs/architecture.md`](docs/architecture.md) for stage-by-stage detail.
+- **`scan`** — finds issues (the detection pipeline above).
+- **`remediate`** (S10) — proposes, and in fix mode applies, a minimal fix per finding.
+- **`validate`** (S11) — checks those fixes with an agentic adversarial panel.
+
+(The CLI also ships `setup`, `doctor`, `estimate`, and `gc` — run `vvaharness --help`.)
+
+> ⚠️ Because Phase 2 is on by default, a plain `vvaharness scan` runs all 11 steps and
+> **edits source files in the target repo** (S10 fix mode). For detection only, pass
+> `--stop-after s9` — see [Quick start](#quick-start).
+
+Standardized inputs (batch repositories, GitHub Enterprise metadata, CMDB records,
+CVE and control feeds) flow in; structured reports, SARIF artifacts, and API-ready
+findings flow out. See [`docs/architecture.md`](docs/architecture.md) for
+stage-by-stage detail.
 
 ---
 
 ## Skills
 
-Each pipeline stage is implemented as a composable, reusable skill. Skills can
-be independently tuned, versioned, and replaced without rewiring the pipeline.
+Each LLM-driven pipeline stage is implemented as a composable, reusable skill.
+Two stages have no skill of their own: **S9** (SARIF emission) is fully
+deterministic, and **S5** (pre-filter) runs deterministic gates plus one
+*optional* semantic-dedup call that reuses the S7 `dedup` role — fired only when
+the survivor count reaches `step7_dedup.pre_verify_threshold` (default 25) and
+`step7_dedup.semantic` is on (default true). Skills can be independently tuned,
+versioned, and replaced without rewiring the pipeline.
 
 | Stage | Skill |
 |---|---|
 | S1 — Explore the attack surface | Attack surface mapper (code, CMDB, CVE, controls) |
 | S2 — Model threats in business context | AppSec threat modeler (STRIDE, OWASP, trust boundaries) |
 | S3 — Strategize and prioritize | Vulnerability research strategist (taint, API boundaries, authorization controls) |
-| S4 — Research by specialized lens | Language, Crypto, Logic-bug, Access-control, Batch/ETL, IaC |
+| S4 — Research by specialized lens | Language, Crypto, Logic-bug, Access-control, Batch/ETL, IaC (Deserialization defined but not default-enabled — see docs/SKILLS.md) |
 | S6 — Adversarial verification | Adversarial reviewer (exploit chain, trust boundary tracing) |
+| S7 — Deduplicate findings | Finding deduplicator (semantic collapse of overlapping findings, atop a deterministic pass) |
 | S8 — Chain construction and reporting | Exploit strategist (CWE, attack paths, remediation) |
+
+The standalone `validate` command adds an agentic adversarial panel — two
+always-on personas (`security-architect`, `penetration-tester`) plus a
+conditional `cross-repo-analyzer`, spawned only when a fix spans 2+
+repositories — that scores each remediation DTO against weighted fix-quality
+gates.
 
 See [`docs/SKILLS.md`](docs/SKILLS.md) for configuration and extension guidance.
 
@@ -89,10 +137,10 @@ See [`docs/SKILLS.md`](docs/SKILLS.md) for configuration and extension guidance.
 ## Requirements
 
 - **Python ≥ 3.10**
-- An LLM credential — a Claude Code login (`claude login`) for the default
+- An LLM credential — a Claude Code login (run `claude` then `/login`) for the default
   profile, **or** an Anthropic API key (`ANTHROPIC_SDK_API_KEY`) / `OPENAI_API_KEY`
   if you switch roles to `via: sdk` / `via: openai`; see [Configure](#configure).
-- The `claude` CLI — required for the default (`cli`) profile; optional otherwise.
+- The `claude` CLI — required for the default profile (every role `via: cli`); optional otherwise.
 
 ## Install
 
@@ -120,8 +168,11 @@ Or install it as an isolated global command (no venv needed) on any OS:
 pipx install .
 ```
 
-Either way this installs one command: `vvaharness`. All three backends (Anthropic
-SDK, Claude CLI, OpenAI-compatible) are available out of the box.
+Either way this installs one command: `vvaharness`. All three backend adapters (Anthropic
+SDK, Claude CLI, OpenAI-compatible) ship out of the box. The Anthropic SDK and
+OpenAI backends need only an API key, but the **Claude CLI backend used by the
+default profile also requires the external `claude` CLI to be installed
+separately** (see [Requirements](#requirements)).
 
 ## Configure
 
@@ -152,12 +203,14 @@ Which credential you need depends on the backend each role uses:
 - **`via: openai`** — set `OPENAI_API_KEY` (and `OPENAI_BASE_URL` for an
   OpenAI-compatible endpoint).
 
-The default profile (`vvaharness/config/profiles/default.yaml`) runs every stage
-through the `claude` CLI on `claude-sonnet-4-6` — your Claude Code login is
-enough, no SDK key required. (`cli.yaml` is the same layout with `Bash` added to
-the agentic stages.) To use the multi-backend layout (Claude CLI + Anthropic SDK
-+ OpenAI roles), copy `vvaharness/config/profiles/full.yaml` to `./config.yaml`
-and edit it.
+The default profile (`vvaharness/config/profiles/default.yaml`) runs every
+detection stage (S1–S8) through the `claude` CLI, with the remediate (S10) and
+validate (S11) roles pinned to a higher-tier model — all `via: cli`, so your
+Claude Code login is enough, no SDK key required. (Exact model IDs are set per
+role in the profile.) (`sdk.yaml` runs the same roles via the Anthropic
+SDK instead — set `ANTHROPIC_SDK_API_KEY` — and turns on s4 majority voting.) To
+use the multi-backend layout (Claude CLI + Anthropic SDK + OpenAI roles), copy
+`vvaharness/config/profiles/full.yaml` to `./config.yaml` and edit it.
 
 For a step-by-step walkthrough — picking a profile, config resolution order,
 secrets in `.env`, and copy-then-edit customisation — see
@@ -167,8 +220,8 @@ secrets in `.env`, and copy-then-edit customisation — see
 
 | You are… | What you need | Profile |
 |---|---|---|
-| **Public / subscription user** (most people) | Claude Code (`claude login`) for the default; **or** an Anthropic API key `ANTHROPIC_SDK_API_KEY=sk-ant-…` if you prefer `via: sdk` roles | `default` / `cli` (login) or `full` (key) — nothing else: no gateway, no CA cert, no extra flags |
-| **Enterprise behind a private AI gateway** | also set `ANTHROPIC_BASE_URL`, plus `NODE_EXTRA_CA_CERTS` (private CA) and `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` if the gateway needs them | `default` / `cli` or `full` — see [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md) |
+| **Public / subscription user** (most people) | Claude Code (run `claude` then `/login`) for the default; **or** an Anthropic API key `ANTHROPIC_SDK_API_KEY=sk-ant-…` if you prefer `via: sdk` roles | `default` (login) or `sdk` (key) — nothing else: no gateway, no CA cert, no extra flags |
+| **Enterprise behind a private AI gateway** | for `via: cli` roles set `ANTHROPIC_BASE_URL`, plus `NODE_EXTRA_CA_CERTS` (private CA) and `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` if the gateway needs them (for a `full` profile also point `ANTHROPIC_SDK_BASE_URL` / `OPENAI_BASE_URL` at the gateway for its SDK / OpenAI roles) | `default` or `full` — see [docs/SETUP_GUIDE.md](docs/SETUP_GUIDE.md) |
 
 Run **`vvaharness setup`** either way — it tells you exactly what (if anything)
 is missing for *your* situation. A gateway token is only flagged when you
@@ -180,9 +233,8 @@ See **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** for all commands and options an
 ## Run
 
 ```bash
-vvaharness doctor                                   # check credentials/backends
-vvaharness estimate --repo /path/to/target          # rough scope/cost, no spend
-vvaharness scan --repo /path/to/target --application-id 12345
+vvaharness scan --repo /path/to/target --application-id 12345   # full 11-step run — ⚠ edits source (S10 fix mode)
+vvaharness scan --repo /path/to/target --stop-after s9          # detection only — no code changes
 ```
 
 Batch (clone + scan, one report per AppId):
@@ -192,8 +244,28 @@ vvaharness scan --repo-file repos.csv --workspace ./scans --group-by-app --keep-
 ```
 
 A `scan` run writes `run_manifest.json` (tool version, model roles, config hash,
-target git SHA, timing) into the working directory. (`doctor` and `estimate`
-do no scan and write no manifest.)
+target git SHA, timing) into the working directory. (`doctor` and `estimate` do no
+scan and write no manifest.) Remember the default profile **edits source in the
+target** — see the [Quick start](#quick-start) warning.
+
+## Validation
+
+`vvaharness validate` checks the fixes that `remediate` produced. It discovers the
+per-finding reports under `<repo>/security-remediation/<NN_slug>/remediate_report.json`,
+then runs an agentic adversarial panel (Claude Agent SDK) that scores each fix and
+records a verdict (`validated`, `validation_failed`, or `needs_review`). The panel is
+**read-only** — it reads the repo and writes only its own validation artifacts, never
+applies a patch, and runs no Docker. Re-runs are idempotent.
+
+```bash
+# Claude Agent SDK ships with vvaharness (Python ≥3.10) — no extra install needed
+vvaharness validate --repo /path/to/target
+```
+
+Validation is **Anthropic-only** (`models.validate` must run `via: cli` or `via: sdk`);
+see [Limitations](#limitations-read-before-you-trust-output). For the panel personas,
+weighted gates, and verdict thresholds, see [`docs/validation.md`](docs/validation.md)
+(and [`docs/remediation.md`](docs/remediation.md) for the `remediate` command).
 
 ## Use with an AI agent (Claude / Copilot / Gemini)
 
@@ -216,13 +288,22 @@ Per target, under `<target>/security-scan/`:
 - `<module>_<ts>_report.sarif` — SARIF 2.1.0
 - `<module>_<ts>_errors.jsonl` — non-fatal errors
 
+With the default profile, a scan also writes
+`<target>/security-remediation/<NN_slug>/remediate_report.json` and **edits source files
+in the target repo** (S10 fix mode — see the [Quick start](#quick-start) warning); pass
+`--stop-after s9` to skip. `run_manifest.json` is written to the working directory.
+
+Pipeline checkpoints and resume state are kept **outside** the scanned repo, in a
+SQLite state DB at `$VVAHARNESS_STATE_DIR/vvaharness.db` (default
+`~/.vvaharness/state/`); prune old runs with `vvaharness gc`.
+
 ## Limitations (read before you trust output)
 
 - **LLM-generated, non-deterministic.** Findings are triage candidates, not
   confirmed vulnerabilities — human review is required. Two runs may differ.
   Majority-vote FP filtering runs on the `sdk` and `openai` backends; the `cli`
   backend (no temperature control) always runs single-pass, as do SDK/OpenAI
-  models that reject `temperature` (e.g. Opus 4.7+).
+  models that reject `temperature`.
 - **Token-hungry.** Caps are per-stage / per-finding, not global. Use
   `vvaharness estimate` and the `step*.max_budget_usd` knobs.
 - **No published accuracy numbers yet.** Precision/recall figures are not yet

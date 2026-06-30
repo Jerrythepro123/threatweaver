@@ -41,7 +41,7 @@ from pathlib import Path
 
 from vvaharness.models import Chunk, ChunkSize, ContextPackage, Finding, VulnClass
 from vvaharness.backends.llm import prompt, resolve
-from vvaharness.report.redact import redact_counts, redact
+from vvaharness.report.redact import redact_counts, redact, _luhn
 from vvaharness.util.json_extract import extract_json
 from vvaharness.util import errlog as _errlog
 from vvaharness.backends import claude_cli as cli
@@ -522,10 +522,31 @@ Analyze this code and respond with ONLY the JSON findings object."""
 # source" findings) before the code leaves the process.
 _PAN_RX = re.compile(r"\b(?:\d[\s\-]?){13,19}\b")
 
+# A card-context keyword sitting just before the digit run (e.g. `pan =`,
+# `cardNumber:`, `acct_no`, `credit_card`). Matched in a short window preceding
+# the match so a labelled-but-non-Luhn test PAN is still caught.
+_CARD_CTX = re.compile(
+    r"(?i)\b(pan|card(?:[\s_-]*(?:no|num|number))?"
+    r"|cc(?:[\s_-]*(?:no|num|number))?|credit[\s_-]*card"
+    r"|acct|account(?:[\s_-]*(?:no|num|number))?)\b")
+
 
 def _mask_pan(m: re.Match) -> str:
     s = m.group(0)
-    if not (s[0] in "3456" and sum(c.isdigit() for c in s) >= 13):
+    digits = re.sub(r"\D", "", s)
+    if len(digits) < 13:
+        return s
+    # Card-likeness gate (option B): mask only when the run is Luhn-valid (every
+    # issued PAN satisfies the Luhn check digit, regardless of IIN/prefix) OR a
+    # card keyword sits immediately before it. This keeps real cards + labelled
+    # test PANs masked before egress to the external LLM provider (CWE-201)
+    # while no longer clobbering ordinary 13-19 digit literals — nanosecond
+    # timestamps, Snowflake/DB ids, account/version numbers — that a length-only
+    # gate mangled. Layer 2 (the shared IIN+Luhn-gated redactor in report.redact)
+    # still runs after this and is unchanged. First 4 digits + length + layout
+    # are preserved so a researcher can still flag "card/secret literal here".
+    window = m.string[max(0, m.start() - 48): m.start()]
+    if not (_luhn(digits) or _CARD_CTX.search(window)):
         return s
     kept = 0
     out = []
@@ -545,13 +566,24 @@ def _redact_source(text: str, rel: str) -> str:
     for the request to succeed.
 
     Two layers: (1) the partial PAN mask keeps the BIN prefix + length so the
-    researcher can still flag "test card in source" findings and catches
-    non-Luhn test PANs; (2) the shared redactor masks SSNs, credentials, keys,
+    researcher can still flag "test card in source" findings, and catches any
+    Luhn-valid card (any prefix) plus card-keyword-labelled non-Luhn test PANs;
+    (2) the shared redactor masks SSNs, credentials, keys,
     JWTs and Luhn/IIN-valid cards the prefix mask doesn't cover. Both preserve
     line structure (no newlines added/removed) so finding line numbers stay
     accurate. redact_counts() is used (not redact()) because s4 runs chunks
     concurrently and must not race on the shared count side-channel."""
-    masked, n_pan = _PAN_RX.subn(_mask_pan, text)
+    # Count only runs actually masked: _mask_pan now returns non-card runs
+    # unchanged, so subn's match count would over-report. nonlocal closure keeps
+    # the tally local to this call (no cross-chunk race).
+    n_pan = 0
+    def _count_mask(m: re.Match) -> str:
+        nonlocal n_pan
+        repl = _mask_pan(m)
+        if repl != m.group(0):
+            n_pan += 1
+        return repl
+    masked = _PAN_RX.sub(_count_mask, text)
     masked, counts = redact_counts(masked)
     n_other = sum(counts.values())
     if n_pan or n_other:

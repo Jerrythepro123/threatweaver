@@ -25,6 +25,10 @@ s1 preprocess → s2 threatmodel → s3 decompose → s4 deepdive
               → s5 prefilter   → s6 verify     → s7 dedup → s8 chain → s9 SARIF
 ```
 
+The standalone `vvaharness validate` command runs separately (s11 agentic
+panel — which first discovers the DTOs awaiting validation, then runs the
+panel) over the remediation DTOs written by the `remediate` command (Step 10) — see [§2](#2-pipeline-stages) and [§6](#6-commands--run-time-options).
+
 The core idea: **every LLM stage is a config switch.** Each role picks its own
 `{id, via}` in `config.yaml: models`, and the dispatcher (`backends/llm.py`)
 routes on `via:`. **Swapping a role is config-only — no code change.**
@@ -36,9 +40,12 @@ routes on `via:`. **Swapping a role is config-only — no code change.**
 A run is defined by combining choices on two axes:
 
 1. **Per-role backend** (`via:`) — `cli`, `sdk`, or `openai`, chosen
-   independently for each of the 8 LLM roles.
-2. **Per-stage tuning** (`step1:`…`step8:`, `inject:`, `batch:`, `output:`) —
-   cost / depth / precision knobs, plus CLI flags at runtime.
+   independently for each scan LLM role. (The `validate` command's role is
+   Anthropic-only — `via: cli` or `via: sdk`.)
+2. **Per-stage tuning** (`step1:`…`step4:`, `step5_prefilter:`,
+   `step6_verify:`, `step7_dedup:`, `step8:`, `step_remediate:`,
+   `step_validate:`, `inject:`, `batch:`, `output:`) — cost / depth / precision knobs, plus CLI flags at
+   runtime.
 
 ---
 
@@ -50,15 +57,36 @@ A run is defined by combining choices on two axes:
 | s1 preprocess | `preprocess` | yes (agentic) | repo survey + call graph → `ContextPackage` |
 | s2 threatmodel | `threatmodel` | yes | assets, trust boundaries, ranked threats |
 | s3 decompose | `decompose` | yes | risk / taint / specialist chunks → `TaskManifest` |
-| s4 deepdive | `deepdive` | yes | per-chunk findings (×N runs + majority vote) |
-| s5 prefilter | — | **deterministic** | drops low-confidence / unproven findings |
+| s4 deepdive | `deepdive` | yes | per-chunk findings (single pass by default; ×N runs + majority vote when enabled) |
+| s5 prefilter | (`dedup`) | **deterministic gates** | drops low-confidence / unproven findings; runs one optional semantic pre-dedup call (the `dedup` role) when survivors ≥ `step7_dedup.pre_verify_threshold` (default 25) and `step7_dedup.semantic` is on |
 | s6 verify | `verify` | yes (agentic) | adversarial TRUE / FALSE_POSITIVE + CVSS per finding |
 | s7 dedup | `dedup` | yes | deterministic + semantic dedup → canonical findings |
 | s8 chain | `chain` | yes | exploit-chain analysis + re-rank → `FinalReport` |
 | s9 SARIF | — | **deterministic** | parses the Markdown report → SARIF 2.1.0 |
 
-Each stage checkpoints to `<target>/checkpoints/`; `--resume` skips completed
-stages. `s5` and `s9` use no model — they run the same regardless of backend.
+Each `scan` stage checkpoints to the SQLite state DB at
+`$VVAHARNESS_STATE_DIR/vvaharness.db` (default `~/.vvaharness/state/…`);
+`--resume` skips completed stages. `s9` uses no model. `s5`'s gates are
+deterministic, but it also fires one optional semantic pre-dedup call (the
+`dedup` role) when the survivor count reaches `step7_dedup.pre_verify_threshold`.
+
+The standalone **`vvaharness validate`** command runs two further stages over
+the remediation DTOs the `remediate` command writes: **s10** discovers DTOs
+awaiting validation (no model spend), and **s11** runs an agentic adversarial
+panel (Claude Agent SDK: two always-on personas `security-architect` +
+`penetration-tester`, plus a conditional `cross-repo-analyzer` spawned only when
+a fix spans 2+ repositories) that fills each DTO's `validation` block. `models.validate` must be a Claude model
+(`via: cli` or `via: sdk`); a `via: openai` validate model is refused at the
+start of the validate step, before any model spend — the standalone `validate`
+command exits non-zero, and inside a `scan` Step 11 is skipped with a warning
+while the rest of the scan is unaffected. The Claude
+Agent SDK ships as a core dependency (Python ≥3.10).
+
+These same two stages also run automatically at the **end of a `scan`** —
+Step 10 (remediate) then Step 11 (validate) — when `step_remediate.enabled` /
+`step_validate.enabled` are set, which all three shipped profiles default to `true`.
+Run the standalone command to re-validate (or validate findings remediated out
+of band) on its own.
 
 ---
 
@@ -79,10 +107,10 @@ backward compatibility.
 | Rule | Why |
 |---|---|
 | **Bash** is available only in agentic stages (`preprocess`, `verify`) when that role is `via: cli`. | Only the CLI backend exposes Bash; re-add `- Bash` to `allowed_tools` when you switch. |
-| **s4 majority-vote** (`step4.runs > 1`) engages only when `deepdive` is `via: sdk` or `via: openai` *and* the model accepts `temperature`. | Voting is auto-forced to single-pass on `via: cli` and on temp-rejecting models (e.g. Opus 4.7+); the s5 prefilter becomes the main FP defence. |
+| **s4 majority-vote** (`step4.runs > 1`) engages only when `deepdive` is `via: sdk` or `via: openai` *and* the model accepts `temperature`. | Voting is auto-forced to single-pass on `via: cli` and on temp-rejecting **`via: sdk`** models; the s5 prefilter becomes the main FP defence. (On `via: openai` a temp-rejecting model is *not* auto-collapsed — the runs proceed but the endpoint drops `temperature`, so you pay N× for identical samples; point `deepdive` at a temperature-capable model to make voting effective.) |
 | **mTLS** (`client_cert`) works only on `via: sdk` roles. | `cli` (Node has no env path) and `openai` don't support client certs — route at least one role via `sdk` for an mTLS-gated gateway. |
 | **`cli` ignores** `temperature`; **honours** `max_budget_usd` / `effort`, and `max_turns` when the installed CLI supports it. | The CLI manages its own tool loop; `--max-turns` is forwarded only when the binary advertises it (probe-gated), else `--max-budget-usd` / the timeout bound the loop. |
-| **`cli` agentic stages** drive the CLI with `--output-format stream-json --verbose`. | Claude CLI ≥2.1.119 rejects `--print` + `stream-json` without `--verbose`; the pairing is mandatory and emitted unconditionally. Requires a `claude` build that accepts `--verbose` with stream-json (every supported 2.x does). |
+| **`cli` agentic stages** drive the CLI with `--output-format stream-json --verbose`. | Recent Claude CLI builds reject `--print` + `stream-json` without `--verbose`; the pairing is mandatory and emitted unconditionally. Requires a `claude` build that accepts `--verbose` with stream-json (every supported 2.x does). |
 | `sdk` / `openai` auto-drop and retry params the model rejects. | Lets you mix model generations without config churn. |
 
 ---
@@ -95,8 +123,8 @@ shapes:
 ### 4.1 Quick start — Claude Code login (the shipped `default.yaml`)
 
 Every role on one Claude model via the `claude` CLI subprocess. No SDK key —
-it reuses your existing Claude Code login. (`cli.yaml` is the same layout with
-`Bash` added to the agentic stages' `allowed_tools`.)
+it reuses your existing Claude Code login. (`sdk.yaml` is an all-SDK variant —
+every role `via: sdk` with `ANTHROPIC_SDK_API_KEY`, and s4 majority voting on.)
 
 ```yaml
 models:
@@ -119,10 +147,10 @@ the CLI, threat-model/decompose/verify on an OpenAI-compatible endpoint.
 models:
   autoexclude: {id: claude-opus-4-8, via: cli}
   preprocess:  {id: claude-opus-4-8, via: sdk}
-  threatmodel: {id: gpt-4o,          via: openai}
-  decompose:   {id: gpt-4o,          via: openai}
-  deepdive:    {id: claude-opus-4-8, via: sdk}
-  verify:      {id: gpt-4o,          via: openai}
+  threatmodel: {id: gpt-5.5,         via: openai}
+  decompose:   {id: gpt-5.5,         via: openai}
+  deepdive:    {id: claude-sonnet-4-6, via: sdk, temperature: 0.4}  # T0.4 → s4 voting on
+  verify:      {id: gpt-5.5,         via: openai}
   dedup:       {id: claude-opus-4-8, via: sdk}
   chain:       {id: claude-opus-4-8, via: cli}
 ```
@@ -131,7 +159,7 @@ models:
 
 | Recipe | Shape | Unlocks / trade-off |
 |---|---|---|
-| **Max precision (voting)** | all `sdk`, `step4.runs: 4`, `vote_threshold: 3` | Majority-vote FP filtering; higher cost. |
+| **Max precision (voting)** | shipped on in `sdk.yaml` (deepdive `temperature: 0.4`, `step4.runs: 3`, `vote_threshold: 2`); raise toward `temperature: 1.0` / `runs: 4` / `vote_threshold: 3` for more | Majority-vote FP filtering; higher cost. Forced to single-pass on `via: cli` or temp-rejecting models. |
 | **Bash-powered recon** | `preprocess` + `verify` → `cli` (add `- Bash`), rest `sdk` | Shell-based repo inventory & evidence retrieval. |
 | **Air-gapped + mTLS** | all `sdk` with `ca_cert` + `client_cert` | Private gateway behind mutual TLS (sdk-only). |
 | **Cost-lean** | all `openai` | Cheapest endpoint; no Bash, single-pass deepdive. |
@@ -149,7 +177,7 @@ Which credentials a run needs is the **union of the backends any role uses**:
 
 | If any role is… | You need |
 |---|---|
-| `via: sdk` | `ANTHROPIC_SDK_API_KEY` (+ optional `ANTHROPIC_SDK_BASE_URL`, `ANTHROPIC_SDK_CA_CERT`, `ANTHROPIC_SDK_CLIENT_CERT` for mTLS) |
+| `via: sdk` | `ANTHROPIC_SDK_API_KEY` (when sdk is the *only* backend, `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` are accepted as a fallback) (+ optional `ANTHROPIC_SDK_BASE_URL`, `ANTHROPIC_SDK_CA_CERT`, `ANTHROPIC_SDK_CLIENT_CERT` for mTLS) |
 | `via: openai` | `OPENAI_API_KEY` (+ optional `OPENAI_BASE_URL`, `OPENAI_CA_CERT`) |
 | `via: cli` | Claude CLI logged in — run `claude` → `/login`, or set `CLAUDE_CODE_OAUTH_TOKEN` (+ optional `CLAUDE_CLI_CA_CERT`) |
 
@@ -163,21 +191,32 @@ when-is-a-cert-needed matrix.
 
 | Command | Purpose |
 |---|---|
+| `vvaharness setup` | Guided readiness check (Python/git, AI agents, keys, gateway, config); read-only unless `--write-env`, optional `--install-agents`. (Alias: `init`.) |
 | `vvaharness scan …` | Run the full pipeline against one repo or a batch. |
+| `vvaharness remediate --repo <path>` | Walk a prior scan's findings and propose a minimal fix per finding (Remediation Agent, s10). On by default in a scan. |
+| `vvaharness validate --repo <path>` | Run the agentic panel over remediation DTOs (s10 discover + s11). Uses the bundled Claude Agent SDK. On by default in a scan (`step_validate.enabled`). (Alias: `s11`.) |
 | `vvaharness doctor [--config <file>]` | Report credential/backend readiness and live-probe the models the config will use. |
 | `vvaharness estimate --repo <path>` | Print a rough scope/cost preview. Spends nothing. |
+| `vvaharness gc […]` | Prune old checkpoint runs (`--keep-runs` / `--max-age-days` / `--dry-run`). |
 
 | Flag | Effect |
 |---|---|
 | `--repo` / `--repo-file` | Single local checkout, or batch CSV/TXT (clone + scan each). One required, mutually exclusive. |
 | `--config <file>` | Use a specific config YAML (default `./config.yaml`, else packaged `default.yaml`). |
+| `--repo-name <name>` | Module / repository name used for report + SARIF filenames and the report title (single-repo mode only; default: target dir name). |
 | `--application-id <id>` | Drives CMDB AppProfile lookup, VulContextSeverity scoring, SARIF `applicationId`. |
 | `--group-by-app` | Batch: clone every repo sharing an AppId under one dir → one report per application. |
 | `--resume` | Reuse on-disk checkpoints instead of re-running completed stages. |
-| `--stop-after <step>` | Stop after `clone`/`s1`…`s9` (debugging). |
-| `--auto-step1` | AI-survey each target to derive its Step-1 exclusion overlay automatically. |
+| `--stop-after <step>` | `scan`: stop after `clone`/`s1`…`s11`. |
+| `--auto-step1` / `--no-auto-step1` | Force AI auto-exclude on (survey each target to derive its Step-1 overlay) / hard-disable it for this run, overriding the profile's `step1.auto_exclude`. Mutually exclusive. |
+| `--workspace <dir>` | Batch: directory to clone remote repos into (default `./batch-workspace`). |
+| `--remediate` / `--top <N\|all\|*>` | Run the Remediation Agent (s10) after the scan; `--top` caps it to the N highest-CVSS findings. |
 | `--step1-config <file>` | Apply an explicit Step-1 overlay (exclude dirs/exts/globs, `max_file_kb`, `config_dedup`). |
 | `--keep-clones` / `--skip-preflight` | Keep cloned repos after scanning / skip the startup readiness probe. |
+| `--force` | Override safety refusals (currently: the s10 git-SHA staleness check when HEAD moved since the scan). |
+
+`validate` accepts `--repo` (required), `--config`, `--finding` (repeatable),
+`--all`, `--max-findings`, `--workspace`, `--resume`, and `--scan-report`.
 
 ```bash
 vvaharness estimate --repo /path/to/target                      # preview scope/cost, no spend
@@ -199,6 +238,8 @@ vvaharness scan --repo-file repos.csv --workspace ./scans --group-by-app --keep-
 | `step6_verify` | `parallel`, `min_confidence`, `max_budget_usd`, `max_turns`, `allowed_tools`. |
 | `step7_dedup` | `line_tolerance`, `semantic` (toggle LLM dedup), `max_tokens`. |
 | `step8` | chain `timeout`, `max_tokens`. |
+| `step_remediate` *(`remediate` cmd / `--remediate`)* | `enabled` (on by default), `top_n_findings`, `max_budget_usd`, `max_turns`, `allowed_tools` (`Read/Glob/Grep/Edit/Write`, no Bash), `enforce_policy`, `policy_file`/`playbook_file`. |
+| `step_validate` *(`validate` cmd)* | `enabled`, `effort`, `max_turns`, `max_budget_usd`, `max_findings`, `allowed_tools`. (The Claude binary is the `VVAHARNESS_CLAUDE_BINARY` env var, not a config field.) |
 | `inject` | `cve_file`, `controls_file`, `cmdb_file` (CMDB-driven VulContextSeverity scoring). |
 | `batch` | `git_token`, `git_base_url`, `skip_repo_patterns` (never clone UI-test/automation repos). |
 | `output` | `preserve_on_cleanup`. |
@@ -226,7 +267,9 @@ These work regardless of backend choice:
 ## 9. Limitations (read before you trust output)
 
 - **LLM-generated, non-deterministic.** Findings are triage candidates, not confirmed vulnerabilities — human review is required. Two runs may differ.
-- **Voting needs `sdk` + `temperature`.** Models that reject `temperature` (e.g. Opus 4.7+) and the `cli` backend always run single-pass; the deterministic s5 prefilter is then the main FP defence.
+- **Voting needs `sdk`/`openai` + `temperature`.** Models that reject `temperature` and the `cli` backend always run single-pass; the deterministic s5 prefilter is then the main FP defence.
 - **Severity is CVSS-derived.** Findings are labelled Critical / High / Medium / Low / Info, with the scored tiers taken straight from the CVSS 3.1 base-score band (Critical 9.0–10.0, High 7.0–8.9, Medium 4.0–6.9, Low 0.1–3.9) so the label never disagrees with the vector; Info covers findings with no demonstrated exploit path. The base score (0–10) is reported verbatim.
 - **Token-hungry.** Caps are per-stage / per-finding, not global. Use `vvaharness estimate` and the `step*.max_budget_usd` knobs.
+- **Validation is Anthropic-only, and so is remediation _fix mode_.** The `validate` panel refuses a `via: openai` role (aborts with exit code 2); remediation _fix mode_ needs the `Edit`/`Write` tools only the `via: cli` / `via: sdk` (Anthropic) backends expose, so a `via: openai` remediate role can only run `--mode report-only`. Detection (S1–S9) and report-only remediation run on any backend.
+- **Elevated privilege; trusted targets only.** vvaharness assumes an authorized operator running against a repository they trust; scanning untrusted or malicious code can expose host credentials, files, or other risk. If you must scan a less-trusted or sensitive target, apply the compensating controls in [`security.md` → Hardening for less-trusted or sensitive targets](security.md#hardening-for-less-trusted-or-sensitive-targets).
 - **No published accuracy numbers yet.** Precision/recall figures are not yet published.

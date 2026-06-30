@@ -13,4 +13,11 @@
 # limitations under the License.
 
 """vvaharness — agentic SAST pipeline."""
-__version__ = "1.0.0"
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+
+try:
+    # Single source of truth: the installed package metadata (pyproject `version`),
+    # so the CLI banner can never drift from the released version again.
+    __version__ = _pkg_version("vvaharness")
+except PackageNotFoundError:  # running from a source tree that isn't pip-installed
+    __version__ = "1.1.0"

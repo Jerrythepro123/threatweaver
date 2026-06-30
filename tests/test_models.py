@@ -367,7 +367,8 @@ def test_scan_metrics_verification_precision_pct():
 def test_scan_metrics_precision_no_raw_findings():
     assert ScanMetrics(true_positive_count=5).verification_precision_pct == 0.0
 
-from vvaharness.models import _demote_md_headings, _md_cell, FinalReport, RankedFinding
+from vvaharness.models import (
+    _demote_md_headings, _md_cell, AppProfile, FinalReport, RankedFinding, ThreatModel)
 
 
 def test_demote_md_headings_demotes_leading_atx():
@@ -424,3 +425,59 @@ def test_to_markdown_neutralizes_injected_precondition_bullet():
     assert "- ok ## Injected Heading" in md     # flattened onto one bullet
     # the undetermined-verification line is rendered (0 here, additive)
     assert "Verifier errors (excluded" in md
+
+
+def test_to_markdown_neutralizes_injected_cmdb_app_profile():
+    # application_id / name / source come from --application-id and the CMDB CSV
+    # (operator/enterprise-supplied). A crafted value with a newline must not
+    # terminate the "Application profile (CMDB)" list and inject a real heading
+    # or link into the rendered threat-model section.
+    f = _minimal_finding()
+    rf = RankedFinding(finding=f, severity=Severity.HIGH, exploitability_notes="n")
+    ap = AppProfile(
+        application_id="APP1\n## Pwned ID",
+        name="evil\n## Pwned Name\n[click](http://evil)",
+        source="src\n## Pwned Source",
+    )
+    rep = FinalReport(repo_root="/x", findings=[rf], chains=[], summary="s",
+                      threat_model=ThreatModel(), app_profile=ap)
+    md = rep.to_markdown()
+    # The structural heading is still rendered…
+    assert "### Application profile (CMDB)" in md
+    # …but none of the injected payloads become real lines of their own.
+    for ln in md.splitlines():
+        assert not ln.lstrip().startswith("## Pwned")
+        assert ln.strip() != "[click](http://evil)"
+    # Newlines were collapsed (values flattened inline, not dropped).
+    assert "## Pwned Name" in md          # present, but inline within the bullet
+
+
+# ── CWE backfill in to_markdown (cwe_for / VulnClass fallback) ──────────────────
+
+def _report_with(finding):
+    rf = RankedFinding(finding=finding, severity=Severity.HIGH,
+                       exploitability_notes="n")
+    return FinalReport(repo_root="/x", findings=[rf], chains=[], summary="s")
+
+
+def test_to_markdown_backfills_cwe_from_vuln_class_when_token_absent():
+    # cwe is None but vuln_class=use-after-free → deterministic CWE-416 line.
+    f = _minimal_finding(vuln_class=VulnClass.UAF, cwe=None)
+    md = _report_with(f).to_markdown()
+    assert "**CWE:** CWE-416" in md
+    assert "data/definitions/416.html" in md
+
+
+def test_to_markdown_uses_explicit_cwe_token_over_fallback():
+    # An explicit cwe token is preserved (passes through cwe_for unchanged).
+    f = _minimal_finding(vuln_class=VulnClass.UAF, cwe="CWE-787")
+    md = _report_with(f).to_markdown()
+    assert "**CWE:** CWE-787" in md
+    assert "CWE-416" not in md
+
+
+def test_to_markdown_other_class_renders_no_cwe_line():
+    # "other" maps to no CWE → no **CWE:** line (honest: unclassified).
+    f = _minimal_finding(vuln_class=VulnClass.OTHER, cwe=None)
+    md = _report_with(f).to_markdown()
+    assert "**CWE:**" not in md

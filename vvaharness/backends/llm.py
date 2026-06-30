@@ -90,4 +90,8 @@ def agentic(user_prompt: str, *, model: Any, **kw) -> str:
     backend = _BACKENDS.get(via)
     if backend is None:
         raise ValueError(f"Unknown backend `via: {via}` for model {model_id}")
+    # `stream_cb` (live trace) is only implemented on the CLI backend; drop it
+    # for sdk/openai so passing it never raises a TypeError on those backends.
+    if via != "cli":
+        kw.pop("stream_cb", None)
     return backend.agentic(user_prompt, model=model_id, **kw)

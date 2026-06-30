@@ -229,9 +229,10 @@ def detect_ca_cert() -> str | None:
 
 def recommend_profile() -> tuple[str | None, str]:
     """Suggest the shipped profile that matches the credentials actually
-    available. The shipped default/cli profiles are CLI-first (every role
-    via: cli), so Claude Code auth is what the default needs; the SDK and
-    OpenAI backends are only exercised by the multi-backend full.yaml.
+    available. The shipped default profile is CLI-first (every role via: cli),
+    so Claude Code auth is what it needs; sdk.yaml routes every role via: sdk
+    (needs ANTHROPIC_SDK_API_KEY); the OpenAI backend is only exercised by the
+    multi-backend full.yaml.
     Returns (profile_name, reason)."""
     # CLI-first: the packaged default runs every role through the `claude`
     # subprocess, so detect Claude Code auth before any API key.
@@ -243,13 +244,12 @@ def recommend_profile() -> tuple[str | None, str]:
     if cli_auth:
         return "default", ("Claude Code auth detected — the default profile runs "
                            "every role via the claude CLI")
-    # No CLI auth. The only shipped profile that uses a key-based backend is the
-    # multi-backend full.yaml (which ALSO has via: cli and via: openai roles), so
-    # recommend it but be honest that it isn't a drop-in pure-SDK/OpenAI profile.
+    # No CLI auth. sdk.yaml is the drop-in all-SDK profile (every role via: sdk),
+    # so recommend it when an SDK key is present; fall back to the multi-backend
+    # full.yaml only for an OpenAI-only credential.
     if _is_set("ANTHROPIC_SDK_API_KEY"):
-        return "full", ("ANTHROPIC_SDK_API_KEY is set — full.yaml routes some roles "
-                        "via: sdk (its via: cli / via: openai roles still need CLI "
-                        "auth / OPENAI_API_KEY, or repoint them)")
+        return "sdk", ("ANTHROPIC_SDK_API_KEY is set — sdk.yaml routes every role "
+                       "via: sdk and enables s4 majority voting")
     if _is_set("OPENAI_API_KEY"):
         return "full", "OPENAI_API_KEY is set (multi-backend profile uses OpenAI roles)"
     return None, "no usable credential detected yet"
@@ -344,6 +344,83 @@ def config_check(cfg_path: str | Path) -> list[Check]:
         out.append(Check("via:cli backend", FAIL,
                          "`claude` CLI not on PATH (required by this profile)",
                          required=True))
+    # Opt-in post-scan steps (s10 remediate / s11 validate). These never block
+    # the core scan — when misconfigured the orchestrator disables the step and
+    # continues — so their checks are advisory (WARN), but surfacing them here
+    # tells an operator who enabled the flags whether the step will actually run.
+    out += _remediate_checks(cfg)
+    out += _validate_checks(cfg)
+    return out
+
+
+def _backend_credential_ok(via: str) -> tuple[bool, str]:
+    """(ready, detail) for a model role's backend, mirroring the scan-role
+    credential logic above. Presence only — never the value."""
+    if via == "cli":
+        if shutil.which("claude"):
+            return True, "`claude` CLI on PATH"
+        return False, "`claude` CLI not on PATH"
+    if via == "sdk":
+        if (_is_set("ANTHROPIC_SDK_API_KEY") or _is_set("ANTHROPIC_API_KEY")
+                or _is_set("ANTHROPIC_AUTH_TOKEN")):
+            return True, "Anthropic SDK credential present"
+        return False, ("ANTHROPIC_SDK_API_KEY not set "
+                       "(or ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN)")
+    if via == "openai":
+        if _is_set("OPENAI_API_KEY"):
+            return True, "OPENAI_API_KEY set"
+        return False, "OPENAI_API_KEY not set"
+    return True, f"via:{via}"
+
+
+def _remediate_checks(cfg) -> list[Check]:
+    """Step-10 readiness — empty unless ``step_remediate.enabled``. Mirrors
+    ``orchestrator.scan._remediate_preflight``: needs a configured
+    ``models.remediate`` role whose backend credential is present."""
+    if not getattr(getattr(cfg, "step_remediate", None), "enabled", False):
+        return []
+    rem = getattr(getattr(cfg, "models", None), "remediate", None)
+    if rem is None:
+        return [Check("step10: remediate", WARN,
+                      "step_remediate.enabled but models.remediate is unset "
+                      "— remediation will be skipped")]
+    via = getattr(rem, "via", "cli")
+    ready, detail = _backend_credential_ok(via)
+    return [Check("step10: remediate", OK if ready else WARN,
+                  f"via:{via} — {detail}"
+                  + ("" if ready else " — remediation will be skipped"))]
+
+
+def _validate_checks(cfg) -> list[Check]:
+    """Step-11 readiness — empty unless ``step_validate.enabled``. Mirrors the
+    s11 preflight: ``models.validate`` must be an Anthropic backend (via:openai
+    is rejected), the bundled ``claude_agent_sdk`` must be importable, and the
+    validation path requires Python >= 3.10."""
+    if not getattr(getattr(cfg, "step_validate", None), "enabled", False):
+        return []
+    out: list[Check] = []
+    val = getattr(getattr(cfg, "models", None), "validate", None)
+    if val is None:
+        out.append(Check("step11: validate", WARN,
+                         "step_validate.enabled but models.validate is unset "
+                         "— validation will be skipped"))
+    else:
+        via = getattr(val, "via", "cli")
+        if via == "openai":
+            out.append(Check("step11: validate", WARN,
+                             "models.validate.via must be 'cli' or 'sdk' "
+                             "(Anthropic) — 'openai' is rejected by s11"))
+        else:
+            ready, detail = _backend_credential_ok(via)
+            out.append(Check("step11: validate", OK if ready else WARN,
+                             f"via:{via} — {detail}"
+                             + ("" if ready else " — validation will be skipped")))
+    if importlib.util.find_spec("claude_agent_sdk") is not None:
+        out.append(Check("step11: claude_agent_sdk", OK,
+                         "claude_agent_sdk importable"))
+    else:
+        out.append(Check("step11: claude_agent_sdk", WARN,
+                         "claude_agent_sdk missing — reinstall vvaharness (pip install .)"))
     return out
 
 

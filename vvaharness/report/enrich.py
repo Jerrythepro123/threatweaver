@@ -40,7 +40,7 @@ from typing import Optional
 
 from vvaharness import __version__ as _PKG_VERSION
 from vvaharness.report.redact import redact_tree
-from vvaharness.report.cwe import cwe_name, cwe_label
+from vvaharness.report.cwe import cwe_name, cwe_label, cwe_for
 
 csv.field_size_limit(2**31 - 1)
 
@@ -209,6 +209,19 @@ def _csv_col(hdr: dict, *names: str) -> int:
     return -1
 
 
+def _cmdb_enrichment_differs(x: AppInfo, y: AppInfo) -> bool:
+    """True when two CMDB rows that collide on ``normalize_app_id`` carry
+    DIFFERENT enrichment signal — the fields that drive VulContextSeverity /
+    exposure (the four decision bools, plus the parent they inherit from).
+    Exact / benign duplicates (same key, same signal) return False so they stay
+    silent; only a genuine conflict that would drift severity is worth a warning.
+    Parents are compared normalised so '07' and '7' count as the same parent."""
+    for f in ("externally_facing", "pci_scoped", "processes_pan", "pii"):
+        if getattr(x, f) != getattr(y, f):
+            return True
+    return normalize_app_id(x.parent_app_id) != normalize_app_id(y.parent_app_id)
+
+
 def load_cmdb_csv(path: str) -> dict[str, AppInfo]:
     out: dict[str, AppInfo] = {}
     if not path or not os.path.isfile(path):
@@ -264,7 +277,21 @@ def load_cmdb_csv(path: str) -> dict[str, AppInfo]:
             a.processes_pan = _yes(a.pan_raw)
             a.pii = _yes(a.pii_raw)
             a.parent_app_id = _nz(at(row, i_par))
-            out[normalize_app_id(a.id)] = a
+            key = normalize_app_id(a.id)
+            prior = out.get(key)
+            if prior is not None and _cmdb_enrichment_differs(prior, a):
+                # Two rows whose ids normalise to the same key (leading zeros /
+                # surrounding whitespace, e.g. '042' vs '42') carry conflicting
+                # enrichment. Silent last-wins would drift severity/exposure for
+                # whichever app looks it up, so surface it loudly with BOTH raw
+                # ids. Last-wins is preserved (behaviour unchanged) — the operator
+                # must disambiguate the CMDB to resolve it.
+                print(f"  [cmdb] WARN: id {a.id!r} normalises to the same key "
+                      f"{key!r} as earlier id {prior.id!r}, but their "
+                      f"exposure/sensitivity differ ({prior.env_summary()} vs "
+                      f"{a.env_summary()}); last-wins — disambiguate the CMDB to "
+                      f"avoid severity-enrichment drift", file=sys.stderr)
+            out[key] = a
     return out
 
 
@@ -801,8 +828,9 @@ def _driver_rules(findings: list["Finding"], rule_ids: list[str]) -> list[dict]:
     rep_name: dict[str, str] = {}
     for f in findings:
         rid = f.category or f.severity.lower()
-        if rid and rid not in rep_name and f.cwe:
-            nm = cwe_name(f.cwe)
+        eff = cwe_for(f.cwe, f.category)
+        if rid and rid not in rep_name and eff:
+            nm = cwe_name(eff)
             if nm:
                 rep_name[rid] = nm
     rules = []
@@ -815,7 +843,7 @@ def _driver_rules(findings: list["Finding"], rule_ids: list[str]) -> list[dict]:
 
 
 def _cwe_taxonomy(findings: list["Finding"]) -> dict:
-    ids = sorted({f.cwe for f in findings if f.cwe},
+    ids = sorted({c for c in (cwe_for(f.cwe, f.category) for f in findings) if c},
                  key=lambda c: int(c.split("-")[-1]))
     taxa = []
     for cid in ids:
@@ -875,10 +903,12 @@ def generate_sarif(md_path: str, findings: list[Finding],
             "category": f.category,
             "cvssVector": f.cvss,
         }
-        if f.cwe:
-            props["cwe"] = cwe_label(f.cwe)
-            props["cweId"] = f.cwe
-            nm = cwe_name(f.cwe)
+        # Deterministic CWE: parsed token if present, else VulnClass fallback.
+        eff_cwe = cwe_for(f.cwe, f.category)
+        if eff_cwe:
+            props["cwe"] = cwe_label(eff_cwe)
+            props["cweId"] = eff_cwe
+            nm = cwe_name(eff_cwe)
             if nm:
                 props["cweName"] = nm
         if f.cvss_score >= 0:
@@ -909,10 +939,10 @@ def generate_sarif(md_path: str, findings: list[Finding],
             }],
             "properties": props,
         }
-        if f.cwe:
+        if eff_cwe:
             result["taxa"] = [{
                 "toolComponent": {"name": "CWE", "guid": CWE_TAXONOMY_GUID},
-                "id": f.cwe,
+                "id": eff_cwe,
             }]
         if f.also_at:
             related = []

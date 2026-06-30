@@ -123,16 +123,62 @@ def test_load_cves_invalid_json_degrades(tmp_path, capsys):
     assert "could not load CVE feed" in capsys.readouterr().err
 
 
-def test_load_cves_item_failing_validation_degrades(tmp_path, capsys):
-    # missing required "summary" -> per-item validation raises -> whole
-    # feed degrades to [] rather than aborting with a traceback.
+def test_load_cves_item_failing_validation_skipped(tmp_path, capsys):
+    # missing required "summary" -> that ONE record is skipped (per-item
+    # isolation). With no other records the feed loads to []; the WARN names the
+    # per-record skip, not a whole-feed load failure.
     feed = tmp_path / "cves.json"
     feed.write_text(json.dumps([{"id": "CVE-2024-1"}]), encoding="utf-8")
 
     out = cve_feed.load_cves(feed)
 
     assert out == []
+    assert "skipped 1 malformed CVE record" in capsys.readouterr().err
+
+
+def test_load_cves_partial_accept_keeps_valid_drops_bad(tmp_path, capsys):
+    # The core of the per-item isolation fix: a malformed record must NOT
+    # suppress the valid records around it.
+    feed = tmp_path / "cves.json"
+    feed.write_text(json.dumps([
+        {"id": "CVE-2024-1111", "summary": "valid one"},
+        {"id": "CVE-2024-BAD"},                         # missing summary -> skip
+        {"id": "CVE-2024-2222", "summary": "valid two"},
+    ]), encoding="utf-8")
+
+    out = cve_feed.load_cves(feed)
+
+    assert [c.id for c in out] == ["CVE-2024-1111", "CVE-2024-2222"]
+    assert "skipped 1 malformed CVE record" in capsys.readouterr().err
+
+
+def test_load_cves_non_list_payload_degrades(tmp_path, capsys):
+    # {"cves": <non-list>} is structurally malformed -> degrade to [] + WARN,
+    # rather than iterating a scalar.
+    feed = tmp_path / "cves.json"
+    feed.write_text(json.dumps({"cves": 123}), encoding="utf-8")
+
+    out = cve_feed.load_cves(feed)
+
+    assert out == []
     assert "could not load CVE feed" in capsys.readouterr().err
+
+
+def test_load_cves_skipped_item_writes_errlog(tmp_path):
+    # A skipped record is recorded individually (stage inject.cves.item, with
+    # the offending id) without aborting the rest of the feed.
+    feed = tmp_path / "cves.json"
+    feed.write_text(json.dumps([
+        {"id": "CVE-OK", "summary": "ok"},
+        {"id": "CVE-BAD"},                              # missing summary
+    ]), encoding="utf-8")
+
+    out = cve_feed.load_cves(feed)
+
+    assert [c.id for c in out] == ["CVE-OK"]
+    record = json.loads(_errlog._path.read_text(encoding="utf-8").strip())
+    assert record["stage"] == "inject.cves.item"
+    assert "CVE-BAD" in record["unit"]
 
 
 def test_load_cves_degrade_writes_errlog(tmp_path):

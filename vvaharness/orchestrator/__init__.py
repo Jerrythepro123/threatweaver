@@ -16,11 +16,12 @@
 from __future__ import annotations
 
 """
-Agentic SAST — 9-stage LLM security pipeline.
+Agentic SAST — 10-stage LLM security pipeline (step 10 is opt-in remediation).
 
 Usage (via the `vvaharness` console script):
   vvaharness scan --repo /path/to/target [--config config.yaml]
                    [--resume] [--repo-name acme/payments] [--application-id ID]
+                   [--remediate] [--top N]
 
 The default profile runs every role through the Claude CLI (`via: cli`) on
 claude-sonnet-4-6, reusing your Claude Code login (run `claude` then `/login`,
@@ -39,24 +40,51 @@ Steps:
   7. Dedup + VulContextSeverity/Offensive   → (canonical[], dup_dropped[])
   8. Chain                                  → FinalReport (+ ScanMetrics)
   9. MD → SARIF                             → *_report.sarif
+ 10. Remediate (opt-in) — Remediation Agent → <repo>/security-remediation/<NN_slug>/remediate_report.json
+ 11. Validate  (opt-in) — s11 agentic panel → fills each DTO's validation block;
+                                               redacted session log kept alongside it as
+                                               security-remediation/<NN_slug>/validation_session_<finding>.jsonl
 
-Each step checkpoints to {repo}/checkpoints/. --resume skips completed steps.
+The `vvaharness validate --repo <path> --all` command (or `s11`) runs after remediation.
+Both security-scan/ and security-remediation/ are preserved after workspace cleanup.
+
+Each step checkpoints to the SQLite state DB at
+~/.vvaharness/state/vvaharness.db (or $VVAHARNESS_STATE_DIR/vvaharness.db).
+--resume skips completed steps.
 Final report is written to {repo}/security-scan/{module}_{timestamp}_report.{md,sarif}.
 """
-import shutil  # noqa: F401 — patched by tests via orchestrator.shutil
-from vvaharness.orchestrator.config_paths import (  # noqa: F401
-    _app_root, _default_config, _resolve_against, _iter_model_roles, _MODEL_ROLES)
-from vvaharness.orchestrator.checkpoints import (  # noqa: F401
-    _ckpt_path, save_ckpt, load_ckpt, run_id_for)
-from vvaharness.orchestrator.cleanup import (  # noqa: F401
-    _rmtree_rw, _preserve_set, _purge_clone)
-from vvaharness.orchestrator.cmdb import (  # noqa: F401
-    _cmdb_path, _set_cmdb_path, _load_app_profile)
-from vvaharness.orchestrator.enrich_findings import _enrich_findings  # noqa: F401
-from vvaharness.orchestrator.preflight import (  # noqa: F401
-    _mask, _reachable_despite_token_cap, configure_backends,
-    check_backends, probe_backends)
-from vvaharness.orchestrator.scan import scan_repo  # noqa: F401
-from vvaharness.orchestrator.batch import run_batch  # noqa: F401
-from vvaharness.orchestrator.entry import main  # noqa: F401
+import shutil as shutil  # re-exported: patched by tests via orchestrator.shutil
+from vvaharness.orchestrator.config_paths import (
+    _app_root as _app_root,
+    _default_config as _default_config,
+    _resolve_against as _resolve_against,
+    _iter_model_roles as _iter_model_roles,
+    _MODEL_ROLES as _MODEL_ROLES,
+)
+from vvaharness.orchestrator.checkpoints import (
+    save_ckpt as save_ckpt,
+    load_ckpt as load_ckpt,
+    run_id_for as run_id_for,
+)
+from vvaharness.orchestrator.cleanup import (
+    _rmtree_rw as _rmtree_rw,
+    _preserve_set as _preserve_set,
+    _purge_clone as _purge_clone,
+)
+from vvaharness.orchestrator.cmdb import (
+    _cmdb_path as _cmdb_path,
+    _set_cmdb_path as _set_cmdb_path,
+    _load_app_profile as _load_app_profile,
+)
+from vvaharness.orchestrator.enrich_findings import _enrich_findings as _enrich_findings
+from vvaharness.orchestrator.preflight import (
+    _mask as _mask,
+    _reachable_despite_token_cap as _reachable_despite_token_cap,
+    configure_backends as configure_backends,
+    check_backends as check_backends,
+    probe_backends as probe_backends,
+)
+from vvaharness.orchestrator.scan import scan_repo as scan_repo
+from vvaharness.orchestrator.batch import run_batch as run_batch
+from vvaharness.orchestrator.entry import main as main
 

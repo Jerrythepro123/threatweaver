@@ -18,6 +18,8 @@ from __future__ import annotations
 """orchestrator.config_paths — see package docstring."""
 from pathlib import Path
 
+from vvaharness.config import is_network_path
+
 
 
 
@@ -51,12 +53,27 @@ def _path_within(candidate, root) -> bool:
 
 
 def _resolve_against(base: Path, p: str) -> str:
+    # Refuse UNC/network input paths before they reach any loader's
+    # is_file()/read — on Windows that touch leaks the user's NTLM hash over
+    # SMB. Covers every injected input that funnels through here: inject.*
+    # (cve/controls/cmdb), step_remediate policy/playbook (via _resolve_input),
+    # and TLS ca_cert/client_cert. Check the raw value and the base-joined
+    # result (a UNC base would taint an otherwise-relative path).
+    if is_network_path(p):
+        raise ValueError(
+            f"refusing network/UNC input path {p!r} "
+            f"(reading it could leak credentials over SMB)")
     pp = Path(p)
-    return str(pp if pp.is_absolute() else (base / pp))
+    resolved = pp if pp.is_absolute() else (base / pp)
+    if is_network_path(resolved):
+        raise ValueError(
+            f"refusing network/UNC input path {str(resolved)!r} "
+            f"(reading it could leak credentials over SMB)")
+    return str(resolved)
 
 
 _MODEL_ROLES = ("autoexclude", "preprocess", "threatmodel", "decompose",
-                "deepdive", "verify", "dedup", "chain")
+                "deepdive", "verify", "dedup", "chain", "remediate", "validate")
 
 
 def _iter_model_roles(cfg):

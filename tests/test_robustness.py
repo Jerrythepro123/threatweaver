@@ -36,7 +36,7 @@ def _write(tmp_path, text):
 def test_partial_config_fills_step_defaults(tmp_path):
     cfg = config_mod.load(_write(tmp_path, "models:\n  deepdive: {id: x, via: cli}\n"))
     # Keys the deep-dive stage reads directly must resolve, not raise.
-    assert cfg.step4.vote_threshold == 3
+    assert cfg.step4.vote_threshold == 1
     assert cfg.step4.line_bucket == 10
     assert cfg.step4.max_findings_per_run == 10
     assert cfg.step6_verify.min_confidence == 7
@@ -44,15 +44,15 @@ def test_partial_config_fills_step_defaults(tmp_path):
 
 
 def test_user_values_win_over_defaults(tmp_path):
-    cfg = config_mod.load(_write(tmp_path, "step4:\n  parallel: 9\n  vote_threshold: 1\n"))
+    cfg = config_mod.load(_write(tmp_path, "step4:\n  parallel: 9\n  vote_threshold: 2\n"))
     assert cfg.step4.parallel == 9          # explicit user value
-    assert cfg.step4.vote_threshold == 1    # explicit user value
+    assert cfg.step4.vote_threshold == 2    # explicit user value (differs from default)
     assert cfg.step4.line_bucket == 10      # gap filled from defaults
 
 
 def test_empty_config_still_has_all_steps(tmp_path):
     cfg = config_mod.load(_write(tmp_path, "# just a comment\n"))
-    assert cfg.step4.runs == 4
+    assert cfg.step4.runs == 1
     assert cfg.step1.max_file_kb == 1024
 
 
@@ -82,10 +82,17 @@ def fake_caps(monkeypatch):
     return _set
 
 
-def test_permission_mode_maps_unsupported_to_fallback(fake_caps):
+def test_permission_mode_prefers_acceptedits_over_bypass(fake_caps):
+    fake_caps(False, {"acceptEdits", "bypassPermissions", "default", "plan"})
+    # 'auto' is gone in CLI 2.0.x → must fall back; acceptEdits is the safe
+    # default (Bash NOT auto-approved) and is preferred over bypassPermissions.
+    assert cc._safe_permission_mode("auto") == "acceptEdits"
+
+
+def test_permission_mode_falls_back_when_acceptedits_absent(fake_caps):
     fake_caps(False, {"bypassPermissions", "default", "plan"})
-    # 'auto' is gone in CLI 2.0.x → must fall back to a non-interactive mode.
-    assert cc._safe_permission_mode("auto") == "bypassPermissions"
+    # acceptEdits not advertised → next preference is `default`.
+    assert cc._safe_permission_mode("auto") == "default"
 
 
 def test_permission_mode_honoured_when_supported(fake_caps):
@@ -151,6 +158,31 @@ def test_stage_without_counter(capsys):
     err = capsys.readouterr().err
     assert "▶ doing a thing" in err
     assert "✓ doing a thing" in err
+
+
+def test_stage_emits_blank_line_between_consecutive_stages(capsys):
+    # Each completed stage is followed by a blank line so the [n/total] blocks
+    # are visually separated in the log (1/11, blank, 2/11, …).
+    with stage("Step 1", n=1, total=2):
+        pass
+    with stage("Step 2", n=2, total=2):
+        pass
+    lines = capsys.readouterr().err.split("\n")
+    done1 = next(i for i, l in enumerate(lines) if "✓ [1/2] Step 1" in l)
+    assert lines[done1 + 1] == ""                      # blank separator after step 1
+    # and the next non-blank line is step 2's start, not glued to step 1.
+    nxt = next(l for l in lines[done1 + 1:] if l.strip())
+    assert "[2/2] Step 2" in nxt
+
+
+def test_stage_failure_also_emits_blank_separator(capsys):
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        with stage("Step 1", n=1, total=2):
+            raise ValueError("boom")
+    lines = capsys.readouterr().err.split("\n")
+    failed = next(i for i, l in enumerate(lines) if "✗ [1/2] Step 1" in l)
+    assert lines[failed + 1] == ""
 
 
 def test_scan_without_repo_propagates_systemexit_no_manifest(monkeypatch, tmp_path):
