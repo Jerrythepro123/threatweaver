@@ -57,9 +57,10 @@ These DTOs are exactly what [`validate`](validation.md) (step 11) later grades.
 > and `sdk` backends provide. The OpenAI-compatible backend is sandboxed to
 > `Read`/`Glob`/`Grep` and cannot edit files, so a `via: openai`
 > `models.remediate` role can only do useful work in `--mode report-only` — in
-> fix mode it has no way to write the diff (no hard error; it simply applies
-> nothing). The shipped `default.yaml` uses an Anthropic `via: cli` remediate
-> role, so fix mode works out of the box. See [models.md](models.md).
+> fix mode it has no edit tool, so each finding errors and the remediation step
+> exits non-zero (not a silent no-op). The shipped `default.yaml` uses an
+> Anthropic `via: cli` remediate role, so fix mode works out of the box. See
+> [models.md](models.md).
 
 The tool set is `Read / Glob / Grep / Edit / Write` — **Bash is intentionally
 omitted** (a prompt-injected agent with a host shell would be RCE on the

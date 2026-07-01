@@ -472,8 +472,16 @@ def _run_remediation(report: FinalReport, repo: Path, cfg, ckpt_dir, run_id,
         log_prefix="[s10]")
     findings = [_ranked_to_ra_finding(rf, idx) for idx, rf in enumerate(selected)]
 
-    print(f"  [s10] ⚠ FIX MODE — about to EDIT source files in {repo}; "
-          f"rerun with --stop-after s9 to scan without modifying the target", file=sys.stderr)
+    # Only the Anthropic backends (cli/sdk) expose Edit/Write; via:openai is sandboxed to
+    # Read/Glob/Grep and cannot apply the diff, so don't claim we're about to edit.
+    _, _remediate_via, _ = resolve_model(cfg.models.remediate)
+    if _remediate_via in ("cli", "sdk"):
+        print(f"  [s10] ⚠ FIX MODE — about to EDIT source files in {repo}; "
+              f"rerun with --stop-after s9 to scan without modifying the target", file=sys.stderr)
+    else:
+        print(f"  [s10] ⚠ {_remediate_via} backend cannot edit files (no Edit/Write tool); "
+              f"fix mode errors per finding — use report-only or an Anthropic via:cli/sdk role",
+              file=sys.stderr)
     print(f"  [s10] remediating {len(findings)} finding(s) via Remediation Agent; "
           f"artefacts → {rem_dir}", file=sys.stderr)
 

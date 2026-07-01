@@ -20,21 +20,33 @@ so no command-parsing predicates live here.
 """
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
 from ._decision import PermissionDecision
 
 
-def _resolve_write_path(input_data: Mapping[str, object]) -> Path | None:
-    """Extract and resolve file_path from Write input; return None if missing or unresolvable."""
+def _resolve_write_path(
+    input_data: Mapping[str, object], resolved_target: Path
+) -> Path | None:
+    """Resolve Write's file_path, anchoring a relative path under the target dir."""
     raw_path = input_data.get("file_path", "")
     if not isinstance(raw_path, str) or not raw_path:
         return None
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        candidate = resolved_target / candidate
     try:
-        return Path(raw_path).resolve()
+        return candidate.resolve()
     except (ValueError, OSError):
         return None
+
+
+def _under_target(resolved: Path, resolved_target: Path) -> bool:
+    """True when ``resolved`` sits directly in ``resolved_target`` (case-insensitive)."""
+    return os.path.normcase(str(resolved.parent)) == os.path.normcase(str(resolved_target))
 
 
 def evaluate_write(
@@ -43,9 +55,15 @@ def evaluate_write(
     allowed_output_files: frozenset[str],
 ) -> PermissionDecision:
     """Allow Write only to a permitted output file directly under the target dir."""
-    resolved = _resolve_write_path(input_data)
+    resolved = _resolve_write_path(input_data, resolved_target)
+    if os.environ.get("VVAHARNESS_DEBUG"):
+        print(
+            f"  [s11-writegate] raw={input_data.get('file_path')!r} "
+            f"resolved={resolved} target={resolved_target}",
+            file=sys.stderr,
+        )
     if resolved is None:
         return PermissionDecision(False, "Write path missing or unresolvable", True)
-    if resolved.parent != resolved_target or resolved.name not in allowed_output_files:
+    if not _under_target(resolved, resolved_target) or resolved.name not in allowed_output_files:
         return PermissionDecision(False, f"Write to disallowed path: {resolved}", True)
     return PermissionDecision(True)

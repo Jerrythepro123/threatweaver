@@ -119,9 +119,14 @@ def _dispatch(argv: list[str] | None) -> int:
     if err := _check_path_guards(args):
         print(err, file=sys.stderr)
         return 1
-    workspace_root: Path = args.workspace or (args.repo / REMEDIATION_DIRNAME / WORKSPACE_DIRNAME)
+    # Resolve to absolute (after the UNC guard) so subprocess cwd, the Write gate, and
+    # the report reader agree on one path regardless of the launch directory.
+    repo: Path = args.repo.resolve()
+    workspace_root: Path = (
+        args.workspace or (repo / REMEDIATION_DIRNAME / WORKSPACE_DIRNAME)
+    ).resolve()
     return run_validation(
-        repo=args.repo,
+        repo=repo,
         selection=_resolve_selection(args, config),
         workspace_root=workspace_root,
         config=config,

@@ -37,7 +37,7 @@ from vvaharness.validation.constants.artifacts import (
     VALIDATION_SESSION_LOG_PREFIX,
 )
 from vvaharness.validation.execution.pipeline import execute_plan
-from vvaharness.validation.ingest.dto_loader import select_reports
+from vvaharness.validation.ingest.dto_loader import discover_reports, select_reports
 from vvaharness.validation.ingest.errors import IngestError
 from vvaharness.validation.ingest.manifest_builder import build_manifest
 from vvaharness.validation.ingest.workspace import assert_remediation_applied, stage_workspace
@@ -238,6 +238,27 @@ def _cleanup_workspace(workspace_root: Path) -> None:
         )
 
 
+def _empty_selection_rc(repo: Path) -> int:
+    """Exit code when no validatable reports were selected.
+
+    DTOs exist but are all terminal (e.g. an idempotent re-run after everything is
+    `validated`) → 0, nothing to do; no DTOs at all → 1, a real misconfiguration.
+    """
+    if discover_reports(repo):
+        print(
+            f"validation: nothing to validate — all findings under {repo} are already "
+            "in a terminal state",
+            file=sys.stderr,
+        )
+        return 0
+    valid = " / ".join(VALIDATABLE_STATUSES)
+    print(
+        f"validation cannot run: no findings with a validatable status ({valid}) under {repo}",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def run_validation(
     *,
     repo: Path,
@@ -253,13 +274,7 @@ def run_validation(
         print(f"ingest error: {exc}", file=sys.stderr)
         return 1
     if not reports:
-        valid = " / ".join(VALIDATABLE_STATUSES)
-        print(
-            f"validation cannot run: no findings with a validatable status "
-            f"({valid}) under {repo}",
-            file=sys.stderr,
-        )
-        return 1
+        return _empty_selection_rc(repo)
     # SQLite resume layer (lazy import keeps the validation package standalone-runnable):
     # register the run so s10/s11 checkpoints share one run row, then run per finding.
     from vvaharness.orchestrator.checkpoints import run_id_for

@@ -261,10 +261,11 @@ step8:
 
 step_remediate:                     # Remediation Agent — ON by default. Set `enabled: false` to opt out (`--remediate` forces on).
   enabled: true
-  enforce_policy: false              # opt-in: deny-list/playbook gate + diff post-gate (revert forbidden-path edits)
-  # policy_file:  null              # override path to remediation_policy.yaml (default: shipped repo-root inputs/)
-  # playbook_file: null             # override path to remediation_playbook.yaml (default: shipped repo-root inputs/)
-  
+  enforce_policy: true              # opt-in: deny-list/playbook gate + diff post-gate (revert forbidden-path edits)
+  # policy_file / playbook_file overrides now live in the `inject:` section
+  # (alongside cve_file/controls_file/cmdb_file). A legacy override here is
+  # still honoured as a fallback, but `inject` is the canonical home.
+
   top_n_findings: 5                # top-N by CVSS — bounds cost on large reports (source of truth; --top N overrides ad-hoc; set 'all'/'*'/null to remediate EVERY finding)
   max_budget_usd: 10.0              # per-repo soft cap (token accounting via TOKENS.phase)
   max_turns: 40                     # tool-loop cap (via:sdk / via:openai)
@@ -303,6 +304,11 @@ inject:
   # Single CMDB export. Optional: if unset or the file is absent, VulContextSeverity environmental scoring is skipped
   # (CVSS base + OffensivePriority are still computed). No legacy fallback.
   cmdb_file:      ./inputs/cmdb.csv
+  
+  # Remediation policy/playbook overrides (read by step_remediate's policy gate).
+  # Paths resolve against this config's directory; unset = bundled repo-root inputs/.
+  policy_file:    ./inputs/remediation_policy.yaml
+  playbook_file:  ./inputs/remediation_playbook.yaml
 
 batch:
   # PAT for cloning private repos over HTTPS in --repo-file mode.

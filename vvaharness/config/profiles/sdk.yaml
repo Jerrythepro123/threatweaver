@@ -290,7 +290,11 @@ inject:
   controls_file:  ./inputs/design_controls.yaml
   # Single CMDB export. Optional: if unset or the file is absent, VulContextSeverity environmental scoring is skipped
   # (CVSS base + OffensivePriority are still computed). No legacy fallback.
+  
   cmdb_file:      ./inputs/cmdb.csv
+  policy_file:    ./inputs/remediation_policy.yaml              # override path to remediation_policy.yaml (default: shipped repo-root inputs/)
+  playbook_file:  ./inputs/remediation_playbook.yaml             # override path to remediation_playbook.yaml (default: shipped repo-root inputs/)
+
 
 batch:
   # PAT for cloning private repos over HTTPS in --repo-file mode.
