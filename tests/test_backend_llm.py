@@ -60,18 +60,22 @@ def patched_backends(monkeypatch):
     cli_b, cli_calls = _make_recording_backend()
     sdk_b, sdk_calls = _make_recording_backend()
     oai_b, oai_calls = _make_recording_backend()
+    codex_b, codex_calls = _make_recording_backend()
 
     monkeypatch.setattr(llm, "cli", cli_b)
     monkeypatch.setattr(llm, "sdk", sdk_b)
     monkeypatch.setattr(llm, "oai", oai_b)
+    monkeypatch.setattr(llm, "codex", codex_b)
     monkeypatch.setitem(llm._BACKENDS, "cli", cli_b)
     monkeypatch.setitem(llm._BACKENDS, "sdk", sdk_b)
     monkeypatch.setitem(llm._BACKENDS, "openai", oai_b)
+    monkeypatch.setitem(llm._BACKENDS, "codex", codex_b)
 
     return {
         "cli": (cli_b, cli_calls),
         "sdk": (sdk_b, sdk_calls),
         "openai": (oai_b, oai_calls),
+        "codex": (codex_b, codex_calls),
     }
 
 
@@ -174,6 +178,16 @@ def test_prompt_openai_dispatch(patched_backends):
     assert oai_calls[0][2] == "gpt-example"
 
 
+def test_prompt_codex_dispatch(patched_backends):
+    cfg = _Cfg(id="gpt-codex-example", via="codex")
+    out = llm.prompt("hi", model=cfg)
+    assert out == "PROMPT_RESULT"
+
+    _, codex_calls = patched_backends["codex"]
+    assert len(codex_calls) == 1
+    assert codex_calls[0][2] == "gpt-codex-example"
+
+
 def test_prompt_cli_drops_sdk_only_kwargs(patched_backends):
     # CLI backend has no temperature/thinking/betas flags; dispatcher must strip them.
     llm.prompt(
@@ -241,6 +255,16 @@ def test_agentic_sdk_dispatch(patched_backends):
     assert len(sdk_calls) == 1
     assert sdk_calls[0][0] == "agentic"
     assert sdk_calls[0][2] == "claude-opus-example"
+
+
+def test_agentic_codex_dispatch_preserves_stream_callback(patched_backends):
+    cfg = _Cfg(id="gpt-codex-example", via="codex")
+    cb = lambda line: None
+    out = llm.agentic("go", model=cfg, stream_cb=cb)
+    assert out == "AGENTIC_RESULT"
+    _, codex_calls = patched_backends["codex"]
+    assert len(codex_calls) == 1
+    assert codex_calls[0][3]["stream_cb"] is cb
 
 
 def test_agentic_passes_kwargs_through_unmodified(patched_backends):

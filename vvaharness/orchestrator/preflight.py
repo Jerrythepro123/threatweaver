@@ -22,7 +22,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from vvaharness.backends import sdk, oai, claude_cli as cli
+from vvaharness.backends import sdk, oai, claude_cli as cli, codex
 from vvaharness.backends.llm import resolve as resolve_model
 from vvaharness.orchestrator.config_paths import _iter_model_roles, _resolve_against
 
@@ -90,6 +90,18 @@ def configure_backends(cfg, cfg_dir: Path) -> None:
             effort=getattr(cli_cfg, "effort", None) or None,
         )
 
+
+    codex_cfg = getattr(cfg, "codex", None)
+    if codex_cfg is not None:
+        codex.configure(
+            use_wsl=getattr(codex_cfg, "use_wsl", None),
+            wsl_distro=getattr(codex_cfg, "wsl_distro", None) or None,
+            binary=getattr(codex_cfg, "binary", None) or None,
+            sandbox=getattr(codex_cfg, "sandbox", None) or None,
+            approval_policy=getattr(codex_cfg, "approval_policy", None) or None,
+            full_auto=getattr(codex_cfg, "full_auto", None),
+            no_proxy=getattr(codex_cfg, "no_proxy", None) or None,
+        )
 
 def _reachable_despite_token_cap(err_msg: str) -> bool:
     """True when a probe error actually proves the model is reachable.

@@ -1,0 +1,173 @@
+# Operator-owned OpenAI-only quick triage profile.
+#
+# Use with:
+#   vvaharness scan --repo /mnt/d/upx --stop-after s9 --config ./config-openai-s9.yaml
+#
+# Optional model override:
+#   VVAHARNESS_OPENAI_MODEL=gpt-4o vvaharness scan ...
+#
+# This profile is tuned for speed/cost over completeness. It intentionally
+# samples the riskiest code paths, disables broad catch-all/specialist sweeps,
+# and keeps low concurrency to reduce provider throttling.
+
+models:
+  autoexclude: {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  preprocess:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  threatmodel: {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  decompose:   {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  deepdive:    {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  verify:      {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  dedup:       {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  chain:       {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+
+openai:
+  api_key:    ${OPENAI_API_KEY}
+  base_url:   ${OPENAI_BASE_URL}
+  verify_ssl: true
+  ca_cert:    ${OPENAI_CA_CERT}
+
+step1:
+  auto_exclude: true
+  auto_exclude_max_tokens: 3000
+  max_turns: 4
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+  exclude_dirs:
+    - .vs
+    - .settings
+    - .vscode
+    - .idea
+    - node_modules
+  exclude_exts:
+    - .msi
+    - .nupkg
+    - .pdb
+    - .lib
+    - .aar
+    - .ser
+    - .pbix
+    - .p12
+    - .pfx
+    - .jks
+    - .der
+    - .cer
+    - .doc
+    - .docx
+    - .xls
+    - .xlsx
+    - .xlsm
+    - .bmp
+    - .sqlite
+    - .db
+  exclude_globs:
+    - "**/._*"
+  max_file_kb: 512
+  call_graph_validate: false
+  call_graph_supplement: false
+  call_graph_rounds: 1
+  call_graph_max_targets: 1
+  config_dedup:
+    enabled: true
+    min_cluster_size: 5
+    keep_per_top_dir: true
+    promote_on_secret_hit: true
+    promote_on_insecure_value: true
+
+step2:
+  enabled: true
+  max_tokens: 8000
+  max_threats: 4
+  baseline: auto
+  max_doc_chars: 6000
+  max_manifest_chars: 1500
+  max_modules: 8
+  max_entry_points: 20
+  max_config_reps: 10
+  max_api_artefacts: 10
+
+step3:
+  max_tokens: 8000
+  timeout: 900
+  taint_chunks: false
+  taint_max_hops: 2
+  taint_max_chunks: 2
+  taint_files_per_hop: 2
+  pack_by: loc
+  chunk_token_budget: 35000
+  chunk_overhead_tokens: 12000
+  risk_chunk_loc: 12000
+  catchall_enabled: false
+  catchall_chunk_loc: 2000
+  catchall_max_files: 20
+  max_files_per_chunk: 120
+  specialists: []
+  specialist_chunk_loc: 2500
+
+step4:
+  parallel: 2
+  timeout: 600
+  runs: 1
+  vote_threshold: 1
+  specialist_runs: 0
+  line_bucket: 10
+  max_findings_per_run: 1
+  max_tokens: 8000
+  neighbor_context_lines: 5
+  neighbor_context_max: 8
+
+step5_prefilter:
+  min_pre_confidence: 0.9
+  require_evidence: true
+
+step6_verify:
+  parallel: 2
+  min_confidence: 7
+  max_budget_usd: 0.5
+  max_turns: 4
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+
+step7_dedup:
+  line_tolerance: 3
+  semantic: false
+  max_tokens: 8000
+
+step8:
+  max_tokens: 8000
+  timeout: 600
+
+step_remediate:
+  enabled: false
+
+step_validate:
+  enabled: false
+
+inject:
+  cve_file:      ./vvaharness/config/profiles/inputs/known_cves.json
+  controls_file: ./vvaharness/config/profiles/inputs/design_controls.yaml
+  cmdb_file:     ./vvaharness/config/profiles/inputs/cmdb.csv
+
+batch:
+  git_token: ${GITHUB_TOKEN}
+  git_base_url: ${GIT_BASE_URL}
+  skip_repo_patterns:
+    - "*automation*"
+    - "*-playwright*"
+    - "*-selenium*"
+    - "*-karate*"
+    - "*perf-script*"
+    - "*perf-test*"
+    - "*test-buddy*"
+    - "*-e2e*"
+    - "*-mock-*"
+
+output:
+  preserve_on_cleanup: [security-scan, security-remediation]
+
+
+
+

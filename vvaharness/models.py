@@ -630,7 +630,10 @@ class Finding(BaseModel):
     cvss_score: float | None = None           # 0.0–10.0, computed from vector
     cvss_rating: str | None = None            # None/Low/Medium/High/Critical (cvss.rating(), CVSS 3.1 bands)
     verifier_reasoning: str = ""              # full verifier output, verbatim
-
+    asan_status: str = ""                 # no_crash | crash_confirmed, set by ASAN verifier
+    asan_evidence: str = ""               # ASAN build/repro logs and summary
+    asan_artifacts: list[str] = []          # paths to generated repro samples/scripts/logs
+    asan_repro_command: str = ""          # exact command that triggered ASAN, when confirmed
     # ── Post-s7 environmental enrichment (set by pipeline._enrich_findings) ──
     vsvs_vector: str | None = None            # CVSS env vector w/ CR/IR/AR/MAV
     vsvs_score: float | None = None           # 0.0–10.0
@@ -882,6 +885,26 @@ class FinalReport(BaseModel):
                     _demote_md_headings(f.verifier_reasoning),
                     "",
                 ])
+            if f.asan_status or f.asan_evidence:
+                asan_block = [
+                    "#### ASAN runtime evidence",
+                    f"**Status:** {f.asan_status or 'attempted'}",
+                    "",
+                ]
+                if getattr(f, "asan_repro_command", ""):
+                    asan_block.extend([
+                        "**Trigger command:**",
+                        "",
+                        "```bash",
+                        f.asan_repro_command,
+                        "```",
+                        "",
+                    ])
+                asan_block.extend([
+                    _demote_md_headings(f.asan_evidence),
+                    "",
+                ])
+                out.extend(asan_block)
         if self.chains:
             out.extend(["## Exploit Chains", ""])
             for c in self.chains:

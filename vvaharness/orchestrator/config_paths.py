@@ -73,7 +73,7 @@ def _resolve_against(base: Path, p: str) -> str:
 
 
 _MODEL_ROLES = ("autoexclude", "preprocess", "threatmodel", "decompose",
-                "deepdive", "verify", "dedup", "chain", "remediate", "validate")
+                "deepdive", "verify", "asan_verify", "dedup", "chain", "remediate", "validate")
 
 
 def _iter_model_roles(cfg):

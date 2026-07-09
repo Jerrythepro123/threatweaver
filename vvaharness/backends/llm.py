@@ -28,7 +28,7 @@ whole config node and the dispatcher unpacks it.
 from __future__ import annotations
 from typing import Any
 
-from vvaharness.backends import claude_cli as cli, sdk, oai
+from vvaharness.backends import claude_cli as cli, sdk, oai, codex
 # Re-export so existing `from backends.claude_cli import parse_json_response, TOKENS`
 # call sites can switch to `from backends.llm import ...` uniformly.
 from vvaharness.backends.claude_cli import parse_json_response  # noqa: F401
@@ -47,11 +47,14 @@ def resolve(model_cfg: Any) -> tuple[str, str, dict]:
         return model_cfg, "cli", {}
 
     model_id = getattr(model_cfg, "id", None)
-    if model_id is None:
-        raise ValueError(
-            f"Model config must be a string or have an `id` field: got {model_cfg!r}"
-        )
     via = getattr(model_cfg, "via", None) or "cli"
+    if not model_id:
+        if via == "codex":
+            model_id = ""
+        else:
+            raise ValueError(
+                f"Model config must be a string or have an `id` field: got {model_cfg!r}"
+            )
     extras: dict = {}
     temp = getattr(model_cfg, "temperature", None)
     if temp is not None:
@@ -65,7 +68,7 @@ def resolve(model_cfg: Any) -> tuple[str, str, dict]:
     return model_id, via, extras
 
 
-_BACKENDS = {"cli": cli, "sdk": sdk, "openai": oai}
+_BACKENDS = {"cli": cli, "sdk": sdk, "openai": oai, "codex": codex}
 
 
 def prompt(user_prompt: str, *, model: Any, **kw) -> str:
@@ -90,8 +93,8 @@ def agentic(user_prompt: str, *, model: Any, **kw) -> str:
     backend = _BACKENDS.get(via)
     if backend is None:
         raise ValueError(f"Unknown backend `via: {via}` for model {model_id}")
-    # `stream_cb` (live trace) is only implemented on the CLI backend; drop it
-    # for sdk/openai so passing it never raises a TypeError on those backends.
-    if via != "cli":
+    # `stream_cb` (live trace) is implemented on subprocess-backed agent CLIs;
+    # drop it for sdk/openai so passing it never raises a TypeError there.
+    if via not in ("cli", "codex"):
         kw.pop("stream_cb", None)
     return backend.agentic(user_prompt, model=model_id, **kw)

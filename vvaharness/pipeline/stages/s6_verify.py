@@ -39,6 +39,7 @@ from vvaharness.util import errlog as _errlog
 from vvaharness.backends import claude_cli as cli
 from vvaharness.backends.claude_cli import GuardrailBlocked
 from vvaharness.pipeline.stages.s1_preprocess import q_file
+from vvaharness.pipeline.stages import asan_verify
 
 
 _CVSS_RE = re.compile(
@@ -50,7 +51,7 @@ _CVSS_RE = re.compile(
 )
 _VERDICT_RE = re.compile(
     r"VERDICT:\s*(TRUE_POSITIVE|FALSE_POSITIVE)\s*"
-    r"\(confidence:\s*(\d{1,2})\s*/\s*10\)\s*[—\-–]?\s*(.*)",
+    r"\(confidence:\s*(\d{1,2})\s*/\s*10\)\s*(?:[-:]\s*)?(.*)",
     re.IGNORECASE,
 )
 
@@ -117,7 +118,8 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
     parallel = getattr(cfg.step6_verify, "parallel", 4)
     min_conf = getattr(cfg.step6_verify, "min_confidence", 7)
     print(f"  [s6-verify] verifying {len(findings)} findings "
-          f"({parallel} parallel, gate≥{min_conf}/10)...", file=sys.stderr)
+          f"({parallel} parallel, gate>={min_conf}/10)...", file=sys.stderr)
+    print(f"  [s6-verify] total findings before static analysis: {len(findings)}", file=sys.stderr)
 
     verified: list[Finding] = []
     dropped: list[DroppedFinding] = []
@@ -181,6 +183,10 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
     finally:
         ex.shutdown(wait=True)
 
+    print(f"  [s6-verify] total findings after static analysis: {len(verified)}", file=sys.stderr)
+    verified, asan_dropped = _asan_pass(verified, ctx, cfg)
+    dropped.extend(asan_dropped)
+    print(f"  [s6-verify] total findings after dynamic analysis: {len(verified)}", file=sys.stderr)
     tp = len(verified)
     fp = sum(1 for d in dropped if d.reason == "FALSE_POSITIVE")
     unc = sum(1 for d in dropped if d.reason == "UNCONFIRMED")
@@ -191,6 +197,103 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
           file=sys.stderr)
     return verified, dropped
 
+
+def _asan_limit(raw, total: int) -> int:
+    if raw is None:
+        return total
+    if isinstance(raw, str):
+        value = raw.strip().lower()
+        if value in {"", "all", "*", "none", "unlimited"}:
+            return total
+    try:
+        limit = int(raw)
+    except (TypeError, ValueError):
+        return total
+    if limit <= 0:
+        return total
+    return min(limit, total)
+
+
+def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[Finding], list[DroppedFinding]]:
+    if not asan_verify.enabled(cfg) or not verified:
+        return verified, []
+    block = cfg.step6_verify.asan
+    require_crash = bool(getattr(block, "require_crash", True))
+    candidates = [f for f in verified if asan_verify.should_try(f, cfg)]
+    max_findings = _asan_limit(getattr(block, "max_findings", "all"), len(candidates))
+    skipped = len(verified) - len(candidates)
+    print(f"  [s6-verify] ASAN selected {len(candidates)}/{len(verified)} static TP finding(s), skipped {skipped}, max={max_findings}", file=sys.stderr)
+    out: list[Finding] = []
+    dropped: list[DroppedFinding] = []
+    attempted = 0
+    gated_but_unattempted = 0
+    shared_build = None
+    for f in verified:
+        if not asan_verify.should_try(f, cfg):
+            out.append(f)
+            continue
+        if attempted >= max_findings:
+            gated_but_unattempted += 1
+            if require_crash:
+                dropped.append(_drop(
+                    f,
+                    "UNCONFIRMED",
+                    "ASAN verification required but per-run ASAN attempt budget was exhausted",
+                ))
+            else:
+                out.append(f)
+            continue
+        attempted += 1
+        bug_idx = attempted
+        if shared_build is None:
+            print("    [s6-verify] ASAN repo build planning/building once for selected findings", file=sys.stderr)
+            shared_build = asan_verify.build_repo(ctx, cfg)
+            build_status = "ok" if shared_build.succeeded else "failed"
+            print(f"    [s6-verify] ASAN repo build {build_status}", file=sys.stderr)
+        if not shared_build.succeeded:
+            artifacts = [str(shared_build.artifact_dir)] if shared_build.artifact_dir is not None else []
+            f2 = f.model_copy(update={
+                "asan_status": "no_crash",
+                "asan_evidence": shared_build.summary,
+                "asan_repro_command": "",
+                "asan_artifacts": artifacts,
+            })
+            if require_crash:
+                dropped.append(_drop(f2, "UNCONFIRMED", _asan_drop_detail("ASAN repo build failed; dynamic repro was skipped", shared_build.summary)))
+            else:
+                out.append(f2)
+            print(f"    [s6-verify] ASAN bug{bug_idx} no_crash (repo build failed)", file=sys.stderr)
+            continue
+        print(f"    [s6-verify] ASAN bug{bug_idx} reproducing {f.file}:{f.line_start}", file=sys.stderr)
+        asan = asan_verify.run(f, ctx, cfg, idx=bug_idx, build=shared_build)
+        status = "crash_confirmed" if asan.crashed else "no_crash"
+        artifacts = [str(asan.artifact_dir)] if asan.artifact_dir is not None else []
+        f2 = f.model_copy(update={
+            "asan_status": status,
+            "asan_evidence": asan.summary,
+            "asan_repro_command": asan.repro_command,
+            "asan_artifacts": artifacts,
+        })
+        if require_crash and not asan.crashed:
+            dropped.append(_drop(f2, "UNCONFIRMED", _asan_drop_detail("ASAN did not confirm a crash/repro within the per-bug budget", asan.summary)))
+        else:
+            out.append(f2)
+        print(f"    [s6-verify] ASAN bug{bug_idx} {status}", file=sys.stderr)
+    if attempted or gated_but_unattempted:
+        print(
+            f"  [s6-verify] ASAN gate attempted {attempted}/{len(candidates)} selected finding(s), "
+            f"budget-excluded {gated_but_unattempted}",
+            file=sys.stderr,
+        )
+    return out, dropped
+
+
+
+def _asan_drop_detail(reason: str, evidence: str, limit: int = 1800) -> str:
+    evidence = redact(evidence or "").strip()
+    if len(evidence) > limit:
+        evidence = evidence[:900] + "\n...<truncated>...\n" + evidence[-700:]
+    return f"{reason}\n\n{evidence}" if evidence else reason
 
 def _verify_one(idx: int, f: Finding, ctx: ContextPackage, cfg) -> Finding:
     if cli.aborted():

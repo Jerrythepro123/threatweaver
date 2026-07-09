@@ -1,0 +1,268 @@
+# Operator-owned Codex + ASAN quick triage profile for native projects.
+#
+# Intended command:
+#   vvaharness scan --repo /mnt/d/<target> --stop-after s9 --config ./codex-asan.yaml
+#
+# Tuned for a ~1 hour s1-s9 run on medium native-code repositories: narrow chunking, low parallelism,
+# no s10/s11, gpt-5.5 first for audit, and Codex only for bounded ASAN repro bundles.
+
+models:
+  # Primary audit path: gpt-5.5 through the OpenAI-compatible backend.
+  autoexclude:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  preprocess:   {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  threatmodel:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  decompose:    {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  deepdive:     {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  verify:       {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  dedup:        {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  chain:        {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+
+  # Codex is only used after s6, to author ASAN build/repro bundles.
+  # Empty id means: use the operator's Codex CLI default profile/model.
+  asan_verify:  {id: "${VVAHARNESS_CODEX_MODEL:-}", via: codex}
+
+openai:
+  api_key:    ${OPENAI_API_KEY}
+  base_url:   ${OPENAI_BASE_URL}
+  verify_ssl: true
+  ca_cert:    ${OPENAI_CA_CERT}
+codex:
+  use_wsl: false
+  sandbox: workspace-write
+  approval_policy: never
+  full_auto: false
+  no_proxy: localhost,127.0.0.1,::1
+
+step1:
+  auto_exclude: true
+  auto_exclude_max_tokens: 2500
+  max_turns: 4
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+  exclude_dirs:
+    - .vs
+    - .settings
+    - .vscode
+    - .idea
+    - node_modules
+    - tests
+    - test
+  exclude_exts:
+    - .msi
+    - .nupkg
+    - .pdb
+    - .lib
+    - .aar
+    - .ser
+    - .pbix
+    - .p12
+    - .pfx
+    - .jks
+    - .der
+    - .cer
+    - .doc
+    - .docx
+    - .xls
+    - .xlsx
+    - .xlsm
+    - .bmp
+    - .sqlite
+    - .db
+    - .rdb
+    - .aof
+    - .o
+    - .a
+  exclude_globs:
+    - "**/._*"
+    - "**/*.log"
+    - "**/dump.rdb"
+  max_file_kb: 384
+  call_graph_validate: false
+  call_graph_supplement: false
+  call_graph_rounds: 1
+  call_graph_max_targets: 1
+  config_dedup:
+    enabled: true
+    min_cluster_size: 5
+    keep_per_top_dir: true
+    promote_on_secret_hit: true
+    promote_on_insecure_value: true
+
+step2:
+  enabled: true
+  max_tokens: 6000
+  max_threats: 4
+  baseline: auto
+  max_doc_chars: 5000
+  max_manifest_chars: 1200
+  max_modules: 8
+  max_entry_points: 16
+  max_config_reps: 8
+  max_api_artefacts: 6
+
+step3:
+  max_tokens: 7000
+  timeout: 720
+  taint_chunks: false
+  taint_max_hops: 2
+  taint_max_chunks: 2
+  taint_files_per_hop: 2
+  pack_by: loc
+  chunk_token_budget: 28000
+  chunk_overhead_tokens: 10000
+  risk_chunk_loc: 10000
+  catchall_enabled: false
+  catchall_chunk_loc: 1800
+  catchall_max_files: 12
+  max_files_per_chunk: 90
+  specialists:
+    - native-memory
+  specialist_chunk_loc: 2200
+
+step4:
+  parallel: 2
+  timeout: 540
+  runs: 1
+  vote_threshold: 1
+  specialist_runs: 1
+  line_bucket: 10
+  max_findings_per_run: 2
+  max_tokens: 7000
+  neighbor_context_lines: 4
+  neighbor_context_max: 6
+
+step5_prefilter:
+  min_pre_confidence: 0.85
+  require_evidence: true
+
+step6_verify:
+  parallel: 2
+  min_confidence: 7
+  max_budget_usd: 0.35
+  max_turns: 4
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+  asan:
+    enabled: true
+    # A final TRUE_POSITIVE must have ASAN proof; failed repros become UNCONFIRMED.
+    require_crash: true
+    all_classes: true
+    max_findings: all
+    max_turns: 24
+    max_budget_usd: 15.0
+    repo_build_timeout: 2400
+    per_bug_timeout: 900
+    plan_timeout: 600
+    build_plan_timeout: 600
+    repro_plan_timeout: 600
+    max_samples: 6
+    max_sample_bytes: 4096
+    max_scripts: 3
+    max_script_bytes: 12000
+    max_run_commands: 6
+    build_timeout: 300
+    run_timeout: 60
+    classes:
+      - use-after-free
+      - heap-overflow
+      - stack-overflow
+      - format-string
+      - integer-overflow
+      - type-confusion
+    max_build_commands: 6
+    build_commands:
+      - "timeout 600 cmake -S . -B security-scan/asan/repo_build/cmake-asan -G Ninja -DCMAKE_MODULE_PATH=/mnt/d/visa-vulnerability-agentic-harness/inputs/cmake-modules -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS_RELWITHDEBINFO=\"-O1 -g -fno-omit-frame-pointer -fsanitize=address\" -DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=\"-fsanitize=address\""
+      - "timeout 600 cmake --build security-scan/asan/repo_build/cmake-asan --verbose"
+    allowed_build_prefixes:
+      - "timeout 600 make"
+      - "timeout 300 make"
+      - "timeout 120 make"
+      - "timeout 600 ninja"
+      - "timeout 300 ninja"
+      - "timeout 120 ninja"
+      - "timeout 600 cmake"
+      - "timeout 300 cmake"
+      - "timeout 120 cmake"
+      - "timeout 600 cmake --build"
+      - "timeout 300 cmake --build"
+      - "timeout 120 cmake --build"
+      - "timeout 600 ./configure"
+      - "timeout 300 ./configure"
+      - "timeout 120 ./configure"
+      - "timeout 600 ./autogen.sh"
+      - "timeout 300 ./autogen.sh"
+      - "timeout 120 ./autogen.sh"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 600 make"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 300 make"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 120 make"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 600 ninja"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 300 ninja"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 120 ninja"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 600 cmake"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 300 cmake"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 120 cmake"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 600 cmake --build"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 300 cmake --build"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 120 cmake --build"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 600 ./configure"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 300 ./configure"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 120 ./configure"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 600 ./autogen.sh"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 300 ./autogen.sh"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 120 ./autogen.sh"
+    allowed_run_prefixes:
+      - "timeout 12 ./"
+      - "timeout 12 build/"
+      - "timeout 12 cmake-build-"
+      - "timeout 12 security-scan/asan/repo_build"
+      - "timeout 12 bash security-scan/asan/bug"
+      - "timeout 12 sh security-scan/asan/bug"
+      - "timeout 12 python3 security-scan/asan/bug"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 12 ./"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 12 build/"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 12 cmake-build-"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 12 security-scan/asan/repo_build"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 12 bash security-scan/asan/bug"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 12 sh security-scan/asan/bug"
+      - "ASAN_OPTIONS=abort_on_error=1:detect_leaks=0:symbolize=1 timeout 12 python3 security-scan/asan/bug"
+
+step7_dedup:
+  line_tolerance: 3
+  semantic: false
+  max_tokens: 7000
+
+step8:
+  max_tokens: 7000
+  timeout: 540
+
+step_remediate:
+  enabled: false
+
+step_validate:
+  enabled: false
+
+inject:
+  cve_file:      ./inputs/known_cves.json
+  controls_file: ./inputs/design_controls.yaml
+  cmdb_file:     ./inputs/cmdb.csv
+
+batch:
+  git_token: ${GITHUB_TOKEN}
+  git_base_url: ${GIT_BASE_URL}
+  skip_repo_patterns:
+    - "*automation*"
+    - "*-playwright*"
+    - "*-selenium*"
+    - "*-karate*"
+    - "*perf-script*"
+    - "*perf-test*"
+    - "*test-buddy*"
+    - "*-e2e*"
+    - "*-mock-*"
+
+output:
+  preserve_on_cleanup: [security-scan]
