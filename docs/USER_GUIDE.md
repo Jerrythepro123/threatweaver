@@ -84,6 +84,8 @@ config profiles.
 | `vvaharness doctor [--config <file>]` | Report credential/backend readiness and run a live connectivity probe against the models the config will actually use. |
 | `vvaharness estimate --repo <path>` | Print a rough scope/cost preview (file count, bytes, ~input tokens). Spends nothing. |
 | `vvaharness gc [--keep-runs N] [--max-age-days N] [--run <path>] [--dry-run]` | Prune old checkpoint runs from the SQLite state DB (defaults: keep 100 runs / 5 days). `--run <path>` instead fully evicts the single run for that repo path (its `run_id` is path-derived). |
+| `vvaharness experience <path\|list\|show\|remove\|restore\|validate>` | Inspect and curate the persistent, human-editable archive of ASAN-confirmed bugs. Experience is committed only after s9 completes. |
+| `vvaharness test [--root <checkout>] [pytest flags]` | Run every test module under `tests/`, covering s1–s9, ASAN, adaptive verification planning, experience, CLI, orchestration, reports, remediation, and validation. Returns pytest's exit code. |
 
 A `.env` found from the current directory upward (the first match in the cwd or
 any ancestor) is loaded automatically (variables you export yourself take
@@ -105,13 +107,10 @@ printed as a `[env] loaded …` line.
 | `--group-by-app` | Batch mode: clone every repo sharing an AppId under `<workspace>/<AppId>/` and run **one** scan over that directory (one report per application instead of one per repo). |
 | `--keep-clones` | Don't delete cloned repos after scanning (batch mode). |
 | `--resume` | Reuse on-disk checkpoints (SQLite state DB at `$VVAHARNESS_STATE_DIR/vvaharness.db`, default `~/.vvaharness/state/…`) instead of re-running completed stages. **Assumes the source is unchanged since the checkpointed run** — vvaharness does not detect code edits here. If the target changed, omit `--resume` (a fresh scan is clean) or run `vvaharness gc --run <path>` first to evict stale state. |
-| `--stop-after <step>` | Stop after `clone`/`s1`/…/`s11` (debugging). `clone` stops right after acquiring repos in batch mode and implies `--keep-clones`. |
-| `--remediate` | Run the Remediation Agent (s10) after the scan, proposing a minimal fix per verified finding under `<repo>/security-remediation/`. ORs with `step_remediate.enabled` (on by default). See [§2b](#2b-remediate--propose-fixes). |
-| `--top <N\|all\|*>` | With `--remediate`: remediate only the N highest-CVSS findings (overrides `step_remediate.top_n_findings`; `all`/`*` remediates every finding). |
-| `--force` | Override safety refusals (currently the s10 git-SHA staleness check that guards remediating against a moved checkout). |
+| `--stop-after <step>` | Stop after `clone`/`s1`/…/`s9` (debugging). `clone` stops right after acquiring repos in batch mode and implies `--keep-clones`. |
 | `--skip-preflight` | Skip the startup credential/backend readiness probe. Does **not** bypass model/API authentication. |
 | `--step1-config <file>` | Apply an explicit Step-1 overlay YAML (exclude_dirs/exts/globs, max_file_kb, config_dedup). Lists **append** to the config's `step1`. Mutually exclusive with `--auto-step1` (this wins). |
-| `--auto-step1` | After clone, AI-survey each target to derive its Step-1 overlay; writes `$VVAHARNESS_STATE_DIR/checkpoints/<run_id>/step1.yaml` and applies it before s1. Ignored when `--step1-config` is given. Reused on `--resume`. **Also enabled via `step1.auto_exclude` in config — on by default in the shipped `default` profile** (flag and config OR together, like `--remediate`/`step_remediate.enabled`). To opt a run out, use a profile with `step1.auto_exclude: false`. |
+| `--auto-step1` | After clone, AI-survey each target to derive its Step-1 overlay; writes `$VVAHARNESS_STATE_DIR/checkpoints/<run_id>/step1.yaml` and applies it before s1. Ignored when `--step1-config` is given. Reused on `--resume`. **Also enabled via `step1.auto_exclude` in config — on by default in the shipped `default` profile.** To opt a run out, use a profile with `step1.auto_exclude: false`. |
 | `--no-auto-step1` | Hard-disable AI auto-exclude for this run, **irrespective of `step1.auto_exclude` in the default/sdk/full profile**. Wins over `--auto-step1` and any config default (mutually exclusive with `--auto-step1`). Use this to say "no" from the command line without editing a profile. |
 
 ### Examples
@@ -131,9 +130,8 @@ vvaharness scan --repo-file repos.csv --workspace ./scans --group-by-app --keep-
 
 ## 2a. `validate` — verify remediations
 
-`vvaharness validate` scores remediations produced by the `remediate` command.
-With the shipped `default` profile it runs **automatically as Step 11 of `scan`**;
-it is also a standalone command you can run on its own. It discovers each finding's DTO under
+`vvaharness validate` is a standalone command that scores remediations produced
+by the `remediate` command. It discovers each finding's DTO under
 `<repo>/security-remediation/<NN_slug>/remediate_report.json` (s10 — discovery
 only, no model spend) and runs an agentic adversarial panel (s11) that fills the
 DTO's `validation` block and sets `status` to `validated` (fix passed),
@@ -177,8 +175,7 @@ trust model.
 `<repo>/security-scan/` and walks them with the Remediation Agent (step 10),
 running the configured `models.remediate` role per finding. For each finding it
 writes a DTO under `<repo>/security-remediation/<NN_slug>/remediate_report.json`
-(consumed later by `validate`). It is **on by default** for a scan
-(`step_remediate.enabled: true`) and also runnable standalone.
+(consumed later by `validate`). It runs only when invoked as a standalone command.
 
 ```bash
 # Standalone: remediate the findings of a completed scan

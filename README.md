@@ -73,13 +73,11 @@ not currently accepting external code contributions; see
 pip install .                                          # venv / pipx options under Install
 vvaharness doctor                                      # check credentials & backends
 vvaharness estimate --repo /path/to/target             # rough scope/cost — spends nothing
-vvaharness scan --repo /path/to/target --stop-after s9 # detection only — no code changes
+vvaharness scan --repo /path/to/target                 # detection only — ends at S9
 ```
 
-> ⚠️ **A plain `scan` edits your code.** The shipped default profile continues past
-> detection into Phase 4 remediation (S10) in fix mode, which **edits source
-> files in the target repo**. Add `--stop-after s9` for detection only (no code
-> changes).
+`scan` never remediates or validates and does not edit target source files.
+Run the standalone `remediate` and `validate` commands explicitly when wanted.
 
 New here? Follow [Install](#install) → [Configure](#configure) → [Run](#run).
 
@@ -87,7 +85,7 @@ New here? Follow [Install](#install) → [Configure](#configure) → [Run](#run)
 
 ## Pipeline
 
-VVAH implements an eleven-stage pipeline across four phases.
+VVAH implements a nine-stage detection pipeline.
 
 ### Detection pipeline (`scan`, S1–S9)
 
@@ -100,23 +98,18 @@ reasoning to produce structured, exploit-validated findings.
 | Deep Dive & Verification | S4–S6 | Multi-lens research, policy gates, adversarial verification |
 | Synthesis, Chaining & Reporting | S7–S9 | Deduplication, chain construction, SARIF emission |
 
-### Remediation & validation (`remediate` and `validate`, S10–S11)
+### Optional remediation & validation (`remediate` and `validate`)
 
-After detection, the shipped `default.yaml` runs two more steps. The three core
-commands map cleanly to the workflow:
+After detection, two standalone commands provide an explicit follow-up workflow:
 
 - **`scan`** — finds issues (S1–S9 detection pipeline above).
-- **`remediate`** (S10) — proposes, and in fix mode applies, a minimal fix per
+- **`remediate`** — proposes, and in fix mode applies, a minimal fix per
   finding.
-- **`validate`** (S11) — checks those fixes with an agentic adversarial panel
+- **`validate`** — checks those fixes with an agentic adversarial panel
   before they are treated as validated.
 
 (The CLI also ships `setup`, `doctor`, `estimate`, and `gc` — run
 `vvaharness --help`.)
-
-> ⚠️ Because remediation and validation are on by default, a plain
-> `vvaharness scan` runs all 11 stages and **edits source files in the target
-> repo** (S10 fix mode). For detection only, pass `--stop-after s9`.
 
 Standardized inputs (batch repositories, GitHub Enterprise metadata, CMDB
 records, CVE and control feeds) flow in; structured reports, SARIF artifacts,
@@ -250,9 +243,23 @@ secrets in `.env`, and copy-then-edit customization — see
 ## Run
 
 ```bash
-vvaharness scan --repo /path/to/target --application-id 12345   # full 11-stage run — ⚠ edits source (S10 fix mode)
-vvaharness scan --repo /path/to/target --stop-after s9          # detection only — no code changes
+vvaharness scan --repo /path/to/target --application-id 12345   # detection-only S1–S9
+vvaharness remediate --repo /path/to/target                     # optional; may edit source
+vvaharness validate --repo /path/to/target                      # optional follow-up
 ```
+
+Run the complete project test suite (all modules under `tests/`):
+
+```bash
+vvaharness test
+vvaharness test -x                 # forward pytest flags
+vvaharness test --root /path/to/threatweaver
+```
+
+The command covers s1–s9, ASAN and adaptive verification planning, persistent
+experience, orchestration, CLI, reports, remediation, and validation. It must be
+run from a source checkout (or with `--root`) because the tests are source files,
+not scan-time product data.
 
 Batch (clone + scan, one report per AppId):
 
@@ -262,8 +269,7 @@ vvaharness scan --repo-file repos.csv --workspace ./scans --group-by-app --keep-
 
 A `scan` run writes `run_manifest.json` (tool version, model roles, config hash,
 target git SHA, timing) into the working directory. (`doctor` and `estimate` do
-no scan and write no manifest.) Remember the default profile **edits source in
-the target** — see the [Quick start](#quick-start) warning.
+no scan and write no manifest.)
 
 ---
 
@@ -312,15 +318,35 @@ Per target, under `<target>/security-scan/`:
 - `<module>_<ts>_report.sarif` — SARIF 2.1.0
 - `<module>_<ts>_errors.jsonl` — non-fatal errors
 
-With the default profile, a scan also writes
-`<target>/security-remediation/<NN_slug>/remediate_report.json` and **edits
-source files in the target repo** (S10 fix mode — see the
-[Quick start](#quick-start) warning); pass `--stop-after s9` to skip.
+The standalone `remediate` command writes
+`<target>/security-remediation/<NN_slug>/remediate_report.json` and may edit
+source files when run in fix mode. `scan` itself does neither.
 `run_manifest.json` is written to the working directory.
 
 Pipeline checkpoints and resume state are kept **outside** the scanned repo, in
 a SQLite state DB at `$VVAHARNESS_STATE_DIR/vvaharness.db` (default
 `~/.vvaharness/state/`); prune old runs with `vvaharness gc`.
+
+### Persistent ASAN experience
+
+After a scan successfully completes s9, every finding confirmed by an ASAN crash
+is archived under `~/.vvaharness/experience/asan/active/<fingerprint>/`. Each
+entry contains a human-editable `experience.yaml` and a copy of its repro
+artifacts. Interrupted or pre-s9 scans do not add experience. Set
+`VVAHARNESS_EXPERIENCE_DIR` to choose another persistent location.
+
+```bash
+vvaharness experience path
+vvaharness experience list
+vvaharness experience show <id-prefix>
+vvaharness experience remove <id-prefix> --reason "wrong finding"
+vvaharness experience restore <id-prefix>
+vvaharness experience validate
+```
+
+`remove` moves the entry to `asan/rejected/`; later scans will not relearn that
+fingerprint unless a human runs `restore`. Humans may also edit the YAML directly
+(including `human_notes` and `active`) and then run `experience validate`.
 
 ---
 

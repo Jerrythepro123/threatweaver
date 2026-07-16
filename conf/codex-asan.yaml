@@ -1,10 +1,11 @@
-# Operator-owned Codex + ASAN quick triage profile for native projects.
+# Operator-owned Codex + ASAN broad-audit profile for native projects.
 #
 # Intended command:
 #   vvaharness scan --repo /mnt/d/<target> --stop-after s9 --config ./codex-asan.yaml
 #
-# Tuned for a ~1 hour s1-s9 run on medium native-code repositories: narrow chunking, low parallelism,
-# no s10/s11, gpt-5.5 first for audit, and Codex only for bounded ASAN repro bundles.
+# Tuned for substantially broader s1-s9 coverage than quick triage. This can
+# exceed one hour on a repository the size of nginx. No s10/s11; gpt-5.5 does
+# static audit and Codex is used only for bounded ASAN repro bundles.
 
 models:
   # Primary audit path: gpt-5.5 through the OpenAI-compatible backend.
@@ -36,7 +37,7 @@ codex:
 step1:
   auto_exclude: true
   auto_exclude_max_tokens: 2500
-  max_turns: 4
+  max_turns: 8
   allowed_tools:
     - Read
     - Glob
@@ -79,10 +80,10 @@ step1:
     - "**/*.log"
     - "**/dump.rdb"
   max_file_kb: 384
-  call_graph_validate: false
-  call_graph_supplement: false
-  call_graph_rounds: 1
-  call_graph_max_targets: 1
+  call_graph_validate: true
+  call_graph_supplement: true
+  call_graph_rounds: 4
+  call_graph_max_targets: 3
   config_dedup:
     enabled: true
     min_cluster_size: 5
@@ -92,63 +93,66 @@ step1:
 
 step2:
   enabled: true
-  max_tokens: 6000
-  max_threats: 4
+  max_tokens: 16000
+  max_threats: 20
   baseline: auto
-  max_doc_chars: 5000
-  max_manifest_chars: 1200
-  max_modules: 8
-  max_entry_points: 16
-  max_config_reps: 8
-  max_api_artefacts: 6
+  max_doc_chars: 12000
+  max_manifest_chars: 3000
+  max_modules: 50
+  max_entry_points: 150
+  max_config_reps: 40
+  max_api_artefacts: 40
 
 step3:
-  max_tokens: 7000
-  timeout: 720
-  taint_chunks: false
-  taint_max_hops: 2
-  taint_max_chunks: 2
-  taint_files_per_hop: 2
+  max_tokens: 16000
+  timeout: 1800
+  taint_chunks: true
+  taint_max_hops: 8
+  taint_max_chunks: 40
+  taint_files_per_hop: 5
   pack_by: loc
   chunk_token_budget: 28000
   chunk_overhead_tokens: 10000
-  risk_chunk_loc: 10000
-  catchall_enabled: false
-  catchall_chunk_loc: 1800
-  catchall_max_files: 12
-  max_files_per_chunk: 90
+  risk_chunk_loc: 5000
+  catchall_enabled: true
+  catchall_chunk_loc: 3000
+  catchall_max_files: 100
+  max_files_per_chunk: 80
   specialists:
-    - native-memory
-  specialist_chunk_loc: 2200
+    - crypto
+    - logic-bug
+    - access-control
+  specialist_chunk_loc: 7000
 
 step4:
-  parallel: 2
-  timeout: 540
-  runs: 1
+  parallel: 5
+  timeout: 1200
+  runs: 2
   vote_threshold: 1
   specialist_runs: 1
   line_bucket: 10
-  max_findings_per_run: 2
-  max_tokens: 7000
-  neighbor_context_lines: 4
-  neighbor_context_max: 6
+  max_findings_per_run: 8
+  max_tokens: 16000
+  neighbor_context_lines: 20
+  neighbor_context_max: 40
 
 step5_prefilter:
-  min_pre_confidence: 0.85
+  min_pre_confidence: 0.9
   require_evidence: true
 
 step6_verify:
-  parallel: 2
+  parallel: 5
   min_confidence: 7
-  max_budget_usd: 0.35
-  max_turns: 4
+  max_budget_usd: 1.0
+  max_turns: 8
   allowed_tools:
     - Read
     - Glob
     - Grep
   asan:
     enabled: true
-    # A final TRUE_POSITIVE must have ASAN proof; failed repros become UNCONFIRMED.
+    # A final TRUE_POSITIVE must have ASAN proof; failed repros become
+    # UNCONFIRMED. Apply this requirement to every vulnerability class.
     require_crash: true
     all_classes: true
     max_findings: all
@@ -175,7 +179,7 @@ step6_verify:
       - type-confusion
     max_build_commands: 6
     build_commands:
-      - "timeout 600 cmake -S . -B security-scan/asan/repo_build/cmake-asan -G Ninja -DCMAKE_MODULE_PATH=/mnt/d/visa-vulnerability-agentic-harness/inputs/cmake-modules -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS_RELWITHDEBINFO=\"-O1 -g -fno-omit-frame-pointer -fsanitize=address\" -DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=\"-fsanitize=address\""
+      - "timeout 600 cmake -S . -B security-scan/asan/repo_build/cmake-asan -G Ninja -DCMAKE_MODULE_PATH=/mnt/d/threatweaver/inputs/cmake-modules -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS_RELWITHDEBINFO=\"-O1 -g -fno-omit-frame-pointer -fsanitize=address\" -DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=\"-fsanitize=address\""
       - "timeout 600 cmake --build security-scan/asan/repo_build/cmake-asan --verbose"
     allowed_build_prefixes:
       - "timeout 600 make"
@@ -232,12 +236,12 @@ step6_verify:
 
 step7_dedup:
   line_tolerance: 3
-  semantic: false
-  max_tokens: 7000
+  semantic: true
+  max_tokens: 12000
 
 step8:
-  max_tokens: 7000
-  timeout: 540
+  max_tokens: 12000
+  timeout: 900
 
 step_remediate:
   enabled: false

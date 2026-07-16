@@ -51,7 +51,7 @@ _CVSS_RE = re.compile(
 )
 _VERDICT_RE = re.compile(
     r"VERDICT:\s*(TRUE_POSITIVE|FALSE_POSITIVE)\s*"
-    r"\(confidence:\s*(\d{1,2})\s*/\s*10\)\s*(?:[-:]\s*)?(.*)",
+    r"\(confidence:\s*(\d{1,2})\s*/\s*10\)\s*(?:[-—–:]\s*)?(.*)",
     re.IGNORECASE,
 )
 
@@ -247,7 +247,8 @@ def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[
         bug_idx = attempted
         if shared_build is None:
             print("    [s6-verify] ASAN repo build planning/building once for selected findings", file=sys.stderr)
-            shared_build = asan_verify.build_repo(ctx, cfg)
+            shared_build = asan_verify.build_repo(
+                ctx, cfg, findings=candidates[:max_findings])
             build_status = "ok" if shared_build.succeeded else "failed"
             print(f"    [s6-verify] ASAN repo build {build_status}", file=sys.stderr)
         if not shared_build.succeeded:

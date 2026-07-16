@@ -58,16 +58,12 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
               args, cfg,
               path_prefix: str | None = None) -> tuple[Path | None, int]:
     """
-    Run the full s1→s10 pipeline against one local checkout.
+    Run the full s1→s9 detection pipeline against one local checkout.
 
     Returns (markdown_report_path, verified_finding_count). Raises on failure —
     the batch driver catches and records it. Returns (None, 0) when
-    --stop-after short-circuits before s8. Step 10 (remediation) only runs when
-    opted in via --remediate or cfg.step_remediate.enabled; it walks the
-    findings one-by-one with the Remediation Agent and writes per-finding
-    artefacts under <repo>/security-remediation/. Step 11 (validation) only
-    runs when opted in via cfg.step_validate.enabled; it reads those artefacts
-    and fills each DTO's validation block via the vvaharness.validation package.
+    --stop-after short-circuits before s8. Remediation and validation are
+    explicit standalone commands and never run as part of ``scan``.
     """
     run_id = run_id_for(repo)
 
@@ -183,7 +179,7 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     # ── Step 1 — Pre-process (runs first; s2 consumes its output) ───────
     ctx: ContextPackage | None = load_ckpt(ckpt_dir, run_id, "s1") if args.resume else None
     if ctx is None:
-        with stage(f"Step 1 — Pre-process ({_m('preprocess')})", n=1, total=11), \
+        with stage(f"Step 1 — Pre-process ({_m('preprocess')})", n=1, total=9), \
                 TOKENS.phase("s1-preprocess"):
             ctx = s1_preprocess.run(str(repo), cfg, cves, controls)
         save_ckpt(ckpt_dir, run_id, "s1", ctx)
@@ -198,7 +194,7 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     if tm is None and s2_enabled:
         try:
             with stage(f"Step 2 — Threat model ({_m('threatmodel')})",
-                       n=2, total=11), TOKENS.phase("s2-threatmodel"):
+                       n=2, total=9), TOKENS.phase("s2-threatmodel"):
                 tm = s2_threatmodel.run(str(repo), repo_name, cfg, cves,
                                         controls, ctx=ctx,
                                         app_profile=app_profile)
@@ -216,7 +212,7 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     # ── Step 3 ───────────────────────────────────────────────────────────
     manifest: TaskManifest | None = load_ckpt(ckpt_dir, run_id, "s3") if args.resume else None
     if manifest is None:
-        with stage(f"Step 3 — Decompose ({_m('decompose')})", n=3, total=11), \
+        with stage(f"Step 3 — Decompose ({_m('decompose')})", n=3, total=9), \
                 TOKENS.phase("s3-decompose"):
             manifest = s3_decompose.run(ctx, cfg)
         save_ckpt(ckpt_dir, run_id, "s3", manifest)
@@ -230,7 +226,7 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
         with stage(f"Step 4 — Deep-dive ({_m('deepdive')}; {cfg.step4.runs} runs, "
                    f"vote≥{cfg.step4.vote_threshold}, "
                    f"parallel={getattr(cfg.step4, 'parallel', 1)})",
-                   n=4, total=11), TOKENS.phase("s4-deepdive"):
+                   n=4, total=9), TOKENS.phase("s4-deepdive"):
             findings, chunk_outcomes = s4_deepdive.run(manifest.sorted_chunks(), ctx, cfg)
         # Bundle the per-chunk outcomes with the findings so a --resume that
         # rebuilds metrics still sees the coverage tally.
@@ -250,16 +246,16 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     s7_ckpt = load_ckpt(ckpt_dir, run_id, "s7") if args.resume else None
     if s7_ckpt is None:
         with stage("Step 5 — Pre-filter (deterministic + semantic pre-dedup)",
-                   n=5, total=11), TOKENS.phase("s5-prefilter"):
+                   n=5, total=9), TOKENS.phase("s5-prefilter"):
             findings, pre_dropped = s5_prefilter.run(findings, ctx, cfg)
         if args.stop_after == "s5":
             return None, 0
-        with stage(f"Step 6 — Verify ({_m('verify')})", n=6, total=11), \
+        with stage(f"Step 6 — Verify ({_m('verify')})", n=6, total=9), \
                 TOKENS.phase("s6-verify"):
             verified, dropped = s6_verify.run(findings, ctx, cfg)
         if args.stop_after == "s6":
             return None, 0
-        with stage(f"Step 7 — Dedup ({_m('dedup')})", n=7, total=11), \
+        with stage(f"Step 7 — Dedup ({_m('dedup')})", n=7, total=9), \
                 TOKENS.phase("s7-dedup"):
             canonical, dup_dropped = s7_dedup.run(verified, cfg)
         save_ckpt(ckpt_dir, run_id, "s7",
@@ -291,7 +287,7 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
             false_pos=fp, duplicates=len(dup_dropped),
             chunk_outcomes=chunk_outcomes,
         )
-        with stage(f"Step 8 — Chain ({_m('chain')})", n=8, total=11), \
+        with stage(f"Step 8 — Chain ({_m('chain')})", n=8, total=9), \
                 TOKENS.phase("s8-chain"):
             report = s8_chain.run(canonical, ctx, cfg,
                               dropped=all_dropped,
@@ -327,49 +323,28 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
                                 if report.metrics else {}),
         }
         with stage(f"Step 9 — SARIF (app_id={application_id or '-'})",
-                   n=9, total=11):
+                   n=9, total=9):
             vcs_enrich.md_to_sarif(str(out_path), application_id, app_info,
                                     str(sarif_path), scan_health=scan_health)
         print(f"  [out] wrote {sarif_path}", file=sys.stderr)
         save_ckpt(ckpt_dir, run_id, "s9", str(sarif_path))
+
+    # Experience is committed only after the complete detection scan has
+    # successfully produced both its Markdown report and s9 SARIF. Earlier
+    # stages merely attach evidence to findings; interrupted scans teach nothing.
+    try:
+        from vvaharness.experience.asan import save_completed_scan
+        saved_exp, rejected_exp = save_completed_scan(
+            report, ctx, scan_id=f"{run_id}:{start_ts}")
+        if saved_exp or rejected_exp:
+            print(f"  [experience] committed {len(saved_exp)} ASAN-confirmed "
+                  f"bug(s); {rejected_exp} human-rejected", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001
+        # Archival failure cannot invalidate the completed security report.
+        print(f"  [experience] WARN: ASAN experience commit failed: "
+              f"{redact(str(exc))}", file=sys.stderr)
+        _errlog.log("s9", "asan-experience", exc)
     if args.stop_after == "s9":
-        return out_path, len(report.findings)
-
-    # ── Step 10 — Remediate (opt-in) ────────────────────────────────────
-    # B3: runs INSIDE scan_repo() so the clone still exists. OFF unless
-    # --remediate or step_remediate.enabled. The Remediation Agent walks the
-    # verified findings one-by-one and writes per-finding artefacts under
-    # <repo>/security-remediation/<NN_slug>/ — exactly the same layout the
-    # standalone `vvaharness remediate` command produces. 
-    rem_cfg = getattr(cfg, "step_remediate", None)
-    rem_on = bool(getattr(args, "remediate", False)
-                  or getattr(rem_cfg, "enabled", False))
-
-    if rem_on and report.findings:
-        rem_err = _remediate_preflight(cfg, args, repo, report)
-        if rem_err:
-            print(f"  [s10] DISABLED — {rem_err}", file=sys.stderr)
-            _errlog.log("s10.preflight", repo_name, RuntimeError(rem_err))
-        else:
-            with stage(f"Step 10 — Remediate ({_m('remediate')})",
-                       n=10, total=11), TOKENS.phase("s10-remediate"):
-                _run_remediation(report, repo, cfg, ckpt_dir, run_id,
-                                 resume=args.resume,
-                                 top=getattr(args, "top", None),
-                                 report_md=out_path)
-
-    if args.stop_after == "s10":
-        return out_path, len(report.findings)
-
-    # ── Step 11 — Validate (opt-in) ─────────────────────────────────────
-    val_cfg = getattr(cfg, "step_validate", None)
-    val_on = bool(getattr(val_cfg, "enabled", False))
-    if val_on:
-        with stage("Step 11 — Validate (s11)", n=11, total=11), \
-                TOKENS.phase("s11-validate"):
-            _run_validation(repo, cfg, config_path=args.config, resume=args.resume,
-                            report_md=out_path)
-    if args.stop_after == "s11":
         return out_path, len(report.findings)
 
     elapsed = time.time() - t0
@@ -476,8 +451,8 @@ def _run_remediation(report: FinalReport, repo: Path, cfg, ckpt_dir, run_id,
     # Read/Glob/Grep and cannot apply the diff, so don't claim we're about to edit.
     _, _remediate_via, _ = resolve_model(cfg.models.remediate)
     if _remediate_via in ("cli", "sdk"):
-        print(f"  [s10] ⚠ FIX MODE — about to EDIT source files in {repo}; "
-              f"rerun with --stop-after s9 to scan without modifying the target", file=sys.stderr)
+        print(f"  [s10] ⚠ FIX MODE — about to EDIT source files in {repo}",
+              file=sys.stderr)
     else:
         print(f"  [s10] ⚠ {_remediate_via} backend cannot edit files (no Edit/Write tool); "
               f"fix mode errors per finding — use report-only or an Anthropic via:cli/sdk role",

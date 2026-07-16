@@ -12,16 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Resolution of AI auto-exclude (--auto-step1 flag OR step1.auto_exclude config).
-
-Mirrors the OR-precedence --remediate uses with step_remediate.enabled: the
-flag only turns it ON, config can default it on, and a profile sets
-auto_exclude:false to opt out.
-"""
+"""Resolution of AI auto-exclude and scan stage boundaries."""
 from vvaharness.config import Config
 from vvaharness.orchestrator.config_paths import _packaged_default
-from vvaharness.orchestrator.entry import _resolve_auto_step1
+from vvaharness.orchestrator.entry import SCAN_STOP_CHOICES, _resolve_auto_step1
 import vvaharness.config as config_mod
+
+
+def test_scan_stop_choices_end_at_s9():
+    assert SCAN_STOP_CHOICES[-1] == "s9"
+    assert "s10" not in SCAN_STOP_CHOICES
+    assert "s11" not in SCAN_STOP_CHOICES
 
 
 def _cfg(step1: dict | None) -> Config:

@@ -147,7 +147,7 @@ def test_recommend_default_when_jwt_and_claude(monkeypatch):
     # CLI-first default profile (every role via: cli).
     monkeypatch.delenv("ANTHROPIC_SDK_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "eybc.def.ghi")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "eyJhbGciOi.test.signature")
     monkeypatch.setattr(env.shutil, "which", lambda c: "/usr/bin/claude" if c == "claude" else None)
     prof, _ = env.recommend_profile()
     assert prof == "default"

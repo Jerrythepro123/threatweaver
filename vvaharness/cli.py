@@ -20,6 +20,7 @@ prints a rough scope/cost preview without spending any API budget.
 """
 from __future__ import annotations
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -167,6 +168,58 @@ def _remediate(rest: list[str]) -> int:
     # is configured exactly as a scan would configure it.
     configure_backends(cfg, Path(cfg_path).resolve().parent)
     return remediate(repo, rest, cfg)
+
+
+def _experience(rest: list[str]) -> int:
+    """Inspect and curate the persistent ASAN experience archive."""
+    from vvaharness.experience.cli import main as experience_main
+    return experience_main(rest)
+
+
+def _find_test_root(explicit: str | None = None) -> Path | None:
+    """Locate a source checkout containing the complete shipped test suite."""
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+    else:
+        cwd = Path.cwd().resolve()
+        candidates.extend((cwd, *cwd.parents))
+        candidates.append(Path(__file__).resolve().parents[1])
+    for candidate in candidates:
+        root = candidate.resolve()
+        if ((root / "pyproject.toml").is_file()
+                and (root / "vvaharness").is_dir()
+                and (root / "tests").is_dir()):
+            return root
+    return None
+
+
+def _test(rest: list[str]) -> int:
+    """Run every test module in the source checkout and return pytest's status."""
+    import argparse
+
+    ap = argparse.ArgumentParser(
+        prog="vvaharness test",
+        description="Run the complete vvaharness pytest suite (all tests/ modules).",
+    )
+    ap.add_argument("--root", help="vvaharness source checkout (auto-detected by default)")
+    args, pytest_args = ap.parse_known_args(rest)
+    root = _find_test_root(args.root)
+    if root is None:
+        print("vvaharness test: source checkout not found; run from the vvaharness "
+              "repository or pass --root /path/to/threatweaver", file=sys.stderr)
+        return 2
+    test_files = len(list((root / "tests").glob("test_*.py")))
+    print(f"  vvaharness test: {test_files} test module(s) under {root / 'tests'}")
+    print("  coverage: s1–s9, ASAN, verification planning, experience, CLI, "
+          "orchestration, reports, remediation, validation")
+    forwarded = [arg for arg in pytest_args if arg != "--"]
+    command = [sys.executable, "-m", "pytest", "-ra", "tests", *forwarded]
+    try:
+        return subprocess.run(command, cwd=root, check=False).returncode
+    except OSError as exc:
+        print(f"vvaharness test: could not start pytest: {exc}", file=sys.stderr)
+        return 2
 
 
 def _config_path_from(rest: list[str]) -> str:
@@ -363,9 +416,7 @@ def _setup(rest: list[str]) -> int:
               f"then `vvaharness scan`.\n")
         return 1
     print("\n  Ready ✓  →  vvaharness scan --repo /path/to/target")
-    print("  ⚠ the shipped default profile runs remediation in fix mode, so `scan` EDITS "
-          "source files in the target repo.")
-    print("    For detection only (no code changes): vvaharness scan --repo … --stop-after s9\n")
+    print("  scan runs detection only (s1–s9) and does not modify target source files.\n")
     return 0
 
 
@@ -380,8 +431,9 @@ Commands:
   doctor     Check credentials + live backend connectivity (read-only)
   estimate   Print a rough scope/cost preview for a repo (no API spend)
   gc         Delete old checkpoint runs (--keep-runs / --max-age-days / --dry-run)
-  scan       Scan a repo (or --repo-file batch) for vulnerabilities
-             (⚠ default profile EDITS source files in fix mode — `--stop-after s9` = detection only)
+  experience Inspect or curate persistent ASAN-verified bug experience
+  test       Run the complete vvaharness test suite (all modules under tests/)
+  scan       Scan a repo (or --repo-file batch) for vulnerabilities (s1–s9)
   remediate  Walk findings from a prior scan and remediate them (Remediation Agent)
              (--interactive/-i to pick issues from a menu; --mode fix|report-only;
               --top N overrides step_remediate.top_n_findings to remediate only
@@ -398,8 +450,7 @@ Config:
 Quick start:
   vvaharness setup
   vvaharness estimate --repo /path/to/target
-  vvaharness scan --repo /path/to/target --application-id 12345   # ⚠ edits source by default (S10 fix mode)
-  vvaharness scan --repo /path/to/target --stop-after s9          # detection only — no code changes
+  vvaharness scan --repo /path/to/target --application-id 12345   # detection only; ends at s9
 """)
 
 
@@ -428,6 +479,10 @@ def main(argv: list[str] | None = None) -> int:
             return _estimate(args[1:])
         if cmd == "gc":
             return _gc(args[1:])
+        if cmd == "experience":
+            return _experience(args[1:])
+        if cmd == "test":
+            return _test(args[1:])
         if cmd == "remediate":
             return _remediate(args[1:])
         if cmd in VALIDATE_COMMANDS:

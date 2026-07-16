@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Profile defaults (on-by-default) + persisted-log redaction guards (F34, F29)."""
+"""Profile defaults and persisted-log redaction guards (F34, F29)."""
 
 from __future__ import annotations
 
@@ -31,10 +31,10 @@ _FAKE_AWS_KEY = "AKIAIOSFODNN7EXAMPLE"
 
 # ── Profiles ship the full pipeline ON by default (opt-out) ────────────────────
 @pytest.mark.parametrize("profile", ["default.yaml", "sdk.yaml", "full.yaml"])
-def test_profiles_enable_remediate_and_validate_by_default(profile: str) -> None:
+def test_profiles_disable_scan_remediate_and_validate(profile: str) -> None:
     cfg = harness_config.load(_PROFILES / profile)
-    assert cfg.step_remediate.enabled is True, f"{profile}: step_remediate should be on by default"
-    assert cfg.step_validate.enabled is True, f"{profile}: step_validate should be on by default"
+    assert cfg.step_remediate.enabled is False
+    assert cfg.step_validate.enabled is False
 
 
 # ── F34: default.yaml no longer claims "no SDK API key required" ───────────────

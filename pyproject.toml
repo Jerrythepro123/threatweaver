@@ -34,12 +34,15 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "typing_extensions>=4.0",
     "claude-agent-sdk>=0.2.87",
+    # `vvaharness test` is a supported command, so its runner is a runtime dep.
+    "pytest>=7",
+    "pyflakes>=3",
 ]
 
 [project.optional-dependencies]
 # Dev tooling: `pip install '.[dev]'` to run the test suite + the static
 # undefined-name gate (pyflakes).
-dev = ["pytest>=7", "pyflakes>=3", "ruff>=0.15", "pyright>=1.1.408"]
+dev = ["ruff>=0.15", "pyright>=1.1.408"]
 
 [project.scripts]
 vvaharness = "vvaharness.cli:main"

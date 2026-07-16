@@ -28,24 +28,14 @@ from vvaharness.orchestrator.preflight import (configure_backends,
 from vvaharness.orchestrator.scan import scan_repo
 from vvaharness.orchestrator.batch import run_batch
 
+SCAN_STOP_CHOICES = ("clone", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
+                     "s8", "s9")
+
 for _s in (sys.stdout, sys.stderr):
     try:
         _s.reconfigure(encoding="utf-8")
     except (AttributeError, ValueError):
         pass
-
-
-def _top_arg(raw: str):
-    """argparse ``type`` for ``--top``: accept a positive integer cap or the
-    ``all`` / ``*`` wildcard (remediate every finding). Reuses the SAME coercion
-    the standalone ``remediate`` command uses so both entry points agree on
-    spellings and error text. Raises ``argparse.ArgumentTypeError`` on a bad
-    value so argparse prints a clean usage error."""
-    from vvaharness.remediation_agent.select import _coerce_top_value
-    try:
-        return _coerce_top_value(raw, source="--top")
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(str(e))
 
 
 def _resolve_auto_step1(flag: bool, cfg,
@@ -60,10 +50,9 @@ def _resolve_auto_step1(flag: bool, cfg,
       3. ``step1.auto_exclude`` in config — ON when truthy.
       4. otherwise OFF.
 
-    Steps 2–3 mirror the OR-precedence ``--remediate`` uses with
-    ``step_remediate.enabled``. The config value is read from the already
-    trust-gated ``cfg`` (an in-target config is refused before load), so this
-    adds no new path for attacker-influenced input to enable a stage.
+    The config value is read from the already trust-gated ``cfg`` (an in-target
+    config is refused before load), so this adds no new path for
+    attacker-influenced input to enable a stage.
 
     Pure helper — callers still apply ``--step1-config`` precedence (which wins
     over an enabled auto-derivation) and emit the operator-facing messages.
@@ -112,25 +101,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--resume", action="store_true",
                     help="reuse existing checkpoints for completed steps")
     ap.add_argument("--stop-after",
-                    choices=["clone", "s1", "s2", "s3", "s4", "s5", "s6", "s7",
-                             "s8", "s9", "s10", "s11"],
+                    choices=SCAN_STOP_CHOICES,
                     help="stop after the named step (for debugging); "
                          "'clone' stops right after acquiring repos in batch "
                          "mode and implies --keep-clones")
-    ap.add_argument("--remediate", action="store_true",
-                    help="run step 10: the Remediation Agent proposes a fix "
-                         "for each verified finding and writes per-finding "
-                         "artefacts under <repo>/security-remediation/ (also "
-                         "enabled via step_remediate.enabled in config)")
-    ap.add_argument("--top", type=_top_arg, default=None, metavar="N|all",
-                    help="with --remediate: override step_remediate.top_n_findings "
-                         "for this run — remediate only the N highest-CVSS "
-                         "findings (limit & reorder, highest score first), or "
-                         "pass 'all' / '*' to remediate every finding. The "
-                         "profile's top_n_findings is the default cap.")
-    ap.add_argument("--force", action="store_true",
-                    help="override safety refusals (currently: the s10 "
-                         "git-SHA staleness check)")
     ap.add_argument("--skip-preflight", action="store_true",
                     help="skip the startup credential/backend readiness probe "
                          "(does NOT bypass model/API authentication)")

@@ -58,7 +58,12 @@ def _ranked(title: str, score: float, *, severity: str = "HIGH"):
 def cfg():
     # top_n_findings None → no profile cap; tests pass an explicit --top where
     # the cap itself is under test.
-    return SimpleNamespace(step_remediate=SimpleNamespace(top_n_findings=None))
+    return SimpleNamespace(
+        step_remediate=SimpleNamespace(top_n_findings=None),
+        models=SimpleNamespace(
+            remediate=SimpleNamespace(id="test", via="cli"),
+        ),
+    )
 
 
 def _capture_process_findings(monkeypatch):

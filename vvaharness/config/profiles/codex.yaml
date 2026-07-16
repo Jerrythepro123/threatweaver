@@ -29,35 +29,22 @@
 # defaults to `via: cli` for backward compatibility.
 
 models:
-  # ── Single-backend default (Claude CLI) ────────────────────────────────────
-  # Every role runs via: cli (the `claude` CLI subprocess), reusing your Claude
-  # Code login — run `claude` then `/login`, or set CLAUDE_CODE_OAUTH_TOKEN. No
-  # ANTHROPIC_SDK_API_KEY is needed. (For a private gateway, the CLI honours
-  # ANTHROPIC_BASE_URL if exported.) sdk.yaml is an all-SDK layout (every role
-  # via: sdk, needs ANTHROPIC_SDK_API_KEY) that also enables s4 majority voting;
-  # for a multi-backend layout (CLI + Anthropic SDK + OpenAI roles) copy
-  # config/profiles/full.yaml to ./config.yaml and edit it. No shipped profile
-  # grants Bash — to give a via: cli role a shell, add `- Bash` to its allowed_tools.
-  autoexclude: {id: claude-sonnet-4-6, via: cli}
-  preprocess:  {id: claude-sonnet-4-6, via: cli}
-  threatmodel: {id: claude-sonnet-4-6, via: cli}
-  decompose:   {id: claude-sonnet-4-6, via: cli}
-  deepdive:    {id: claude-sonnet-4-6, via: cli}
-  verify:      {id: claude-sonnet-4-6, via: cli}
-  dedup:       {id: claude-sonnet-4-6, via: cli}
-  chain:       {id: claude-sonnet-4-6, via: cli}
-
-  # Step 10: remediation — the Remediation Agent proposes a minimal fix for
-  # each verified finding and writes per-finding artefacts under
-  # <repo>/security-remediation/.
-  remediate:   {id: claude-opus-4-8, via: cli}
-
-  # models.validate: used by `vvaharness validate` / `s11` (standalone validator).
-  validate:    {id: claude-opus-4-8,       via: cli}
-  # Per-persona model overrides for the s11 validator (unset a line to inherit models.validate):
-  validate_security_architect: {id: claude-opus-4-8}
-  validate_penetration_tester: {id: claude-sonnet-4-6}
-  validate_cross_repo_analyzer: {id: claude-sonnet-4-6}
+  # Detection-only Codex profile. The current Codex backend is read-only,
+  # so remediation/validation are disabled below by default.
+  # Change these model ids if your Codex install uses a different model.
+  autoexclude: {id: gpt-5-codex, via: codex}
+  preprocess:  {id: gpt-5-codex, via: codex}
+  threatmodel: {id: gpt-5-codex, via: codex}
+  decompose:   {id: gpt-5-codex, via: codex}
+  deepdive:    {id: gpt-5-codex, via: codex}
+  verify:      {id: gpt-5-codex, via: codex}
+  dedup:       {id: gpt-5-codex, via: codex}
+  chain:       {id: gpt-5-codex, via: codex}
+  remediate:   {id: gpt-5-codex, via: codex}
+  validate:    {id: gpt-5-codex, via: codex}
+  validate_security_architect: {id: gpt-5-codex, via: codex}
+  validate_penetration_tester: {id: gpt-5-codex, via: codex}
+  validate_cross_repo_analyzer: {id: gpt-5-codex, via: codex}
 
 sdk:
   # Required for via:sdk roles. Set in .env — NEVER hardcode here.
@@ -259,7 +246,7 @@ step8:
   max_tokens: 64000
   timeout: 3600                     # seconds; chain pass on large finding sets can exceed the 600s CLI default
 
-step_remediate:                     # Standalone Remediation Agent settings; `scan` never invokes it.
+step_remediate:                     # Remediation Agent — disabled in the Codex profile. Set `enabled: false` to opt out (`--remediate` forces on).
   enabled: false
   enforce_policy: true              # opt-in: deny-list/playbook gate + diff post-gate (revert forbidden-path edits)
   # policy_file / playbook_file overrides now live in the `inject:` section
@@ -287,7 +274,7 @@ step_remediate:                     # Standalone Remediation Agent settings; `sc
     - Write
 
 
-step_validate:                      # Standalone validator settings; `scan` never invokes it.
+step_validate:                      # s11 validator — disabled in the Codex profile (mirrors step_remediate). Set `enabled: false` to opt out.
   enabled: false
   effort: high
   max_turns: 50

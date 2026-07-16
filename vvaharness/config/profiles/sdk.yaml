@@ -256,8 +256,8 @@ step8:
   max_tokens: 64000
   timeout: 3600                     # seconds; chain pass on large finding sets can exceed the 600s CLI default
 
-step_remediate:                     # Remediation Agent — ON by default. Set `enabled: false` to opt out (`--remediate` forces on).
-  enabled: true
+step_remediate:                     # Standalone Remediation Agent settings; `scan` never invokes it.
+  enabled: false
   enforce_policy: false             # opt-in: deny-list/playbook gate + diff post-gate (revert forbidden-path edits)
   # policy_file:  null              # override path to remediation_policy.yaml (default: shipped repo-root inputs/)
   # playbook_file: null             # override path to remediation_playbook.yaml (default: shipped repo-root inputs/)
@@ -274,8 +274,8 @@ step_remediate:                     # Remediation Agent — ON by default. Set `
     - Edit
     - Write
 
-step_validate:                      # s11 validator — ON by default (mirrors step_remediate). Set `enabled: false` to opt out.
-  enabled: true
+step_validate:                      # Standalone validator settings; `scan` never invokes it.
+  enabled: false
   effort: high
   max_turns: 50
   max_budget_usd: 15.0
