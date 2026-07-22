@@ -28,6 +28,7 @@ from __future__ import annotations
 import fnmatch
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from vvaharness.models import ContextPackage, Finding, DroppedFinding
@@ -113,6 +114,8 @@ def run_static(findings: list[Finding], ctx: ContextPackage, cfg
                ) -> tuple[list[Finding], list[DroppedFinding]]:
     """Run only static adversarial verification."""
     if not findings:
+        print("  [s6-progress] STATIC SKIP candidates=0 reason=no-findings",
+              file=sys.stderr, flush=True)
         return [], []
 
     parallel = getattr(cfg.step6_verify, "parallel", 4)
@@ -126,6 +129,22 @@ def run_static(findings: list[Finding], ctx: ContextPackage, cfg
     dropped: list[DroppedFinding] = []
     guardrail_hits = 0
     guardrail_gate = max(3, parallel)
+    started = time.monotonic()
+    completed = 0
+
+    def _progress(result: str) -> None:
+        nonlocal completed
+        completed += 1
+        remaining = len(findings) - completed
+        active = min(parallel, remaining)
+        queued = max(0, remaining - active)
+        elapsed = time.monotonic() - started
+        eta = (elapsed / completed * remaining) if completed else 0.0
+        print(f"  [s6-progress] STATIC completed={completed}/{len(findings)} "
+              f"running={active} queued={queued} result={result} "
+              f"tp={len(verified)} dropped={len(dropped)} "
+              f"elapsed={elapsed:.1f}s eta={eta:.1f}s",
+              file=sys.stderr, flush=True)
 
     ex = ThreadPoolExecutor(max_workers=parallel)
     futs = {ex.submit(_verify_one, i, f, ctx, cfg): (i, f)
@@ -133,9 +152,11 @@ def run_static(findings: list[Finding], ctx: ContextPackage, cfg
     try:
         for fut in as_completed(futs):
             i, f = futs[fut]
+            result = "error"
             try:
                 f2 = fut.result()
             except GuardrailBlocked as e:
+                result = "guardrail_blocked"
                 guardrail_hits += 1
                 print(f"    [s6-static] #{i} GUARDRAIL-BLOCKED "
                       f"({guardrail_hits}/{guardrail_gate})", file=sys.stderr)
@@ -146,24 +167,30 @@ def run_static(findings: list[Finding], ctx: ContextPackage, cfg
                 if guardrail_hits >= guardrail_gate and not verified:
                     cli.abort()
                     ex.shutdown(wait=False, cancel_futures=True)
+                    _progress(result)
                     raise RuntimeError(
                         f"s6-static: {guardrail_hits} cumulative guardrail "
                         "blocks with zero successes — aborting run.") from e
+                _progress(result)
                 continue
             except Exception as e:
+                result = "verify_error"
                 print(f"    [s6-static] #{i} verify ERROR: {redact(str(e))}", file=sys.stderr)
                 _errlog.log("s6-static", f"#{i}", e,
                             file=getattr(f, "file", None),
                             line=getattr(f, "line_start", None),
                             vuln_class=str(getattr(f, "vuln_class", "")))
                 dropped.append(_drop(f, "VERIFY_ERROR", str(e)[:200]))
+                _progress(result)
                 continue
             if f2.verdict == "TRUE_POSITIVE" and (f2.verdict_confidence or 0) >= min_conf:
                 verified.append(f2)
+                result = "true_positive"
             elif f2.verdict == "TRUE_POSITIVE":
                 dropped.append(_drop(f2, "UNCONFIRMED",
                                      f"verifier confidence {f2.verdict_confidence}/10 "
                                      f"below gate {min_conf}"))
+                result = "unconfirmed"
             elif (f2.verdict_reason == "verifier output unparseable"
                   and (f2.verdict_confidence or 0) == 0):
                 # An unparseable verifier reply (no VERDICT line) is an
@@ -172,8 +199,11 @@ def run_static(findings: list[Finding], ctx: ContextPackage, cfg
                 # skewed the precision metric — record it as VERIFY_ERROR so a
                 # flaky/truncated verification is visible, not silently "clean".
                 dropped.append(_drop(f2, "VERIFY_ERROR", f2.verdict_reason))
+                result = "verify_error"
             else:
                 dropped.append(_drop(f2, "FALSE_POSITIVE", f2.verdict_reason))
+                result = "false_positive"
+            _progress(result)
     except KeyboardInterrupt:
         n = cli.abort()
         print(f"  [s6-static] interrupted — killed {n} running verifier "
@@ -199,12 +229,22 @@ def run_static(findings: list[Finding], ctx: ContextPackage, cfg
 
 def run_asan(verified: list[Finding], ctx: ContextPackage, cfg
              ) -> tuple[list[Finding], list[DroppedFinding]]:
-    """Run only dynamic ASAN verification over static true positives."""
+    """Run dynamic ASAN verification over provisional static positives.
+
+    In ASAN mode, only a sanitizer-confirmed crash may leave this phase as a
+    true positive. Class skips, budget exclusions, build failures, and clean
+    reproductions remain unconfirmed regardless of legacy ``require_crash``
+    configuration.
+    """
     if not verified:
+        print("  [s6-progress] ASAN SKIP candidates=0 reason=no-static-tp",
+              file=sys.stderr, flush=True)
         return [], []
     if not asan_verify.enabled(cfg):
         print("  [s6-asan] disabled; retaining static verification results",
               file=sys.stderr)
+        print(f"  [s6-progress] ASAN SKIP candidates={len(verified)} "
+              "reason=disabled", file=sys.stderr, flush=True)
         return verified, []
 
     out, dropped = _asan_pass(verified, ctx, cfg)
@@ -245,7 +285,6 @@ def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[
     if not asan_verify.enabled(cfg) or not verified:
         return verified, []
     block = cfg.step6_verify.asan
-    require_crash = bool(getattr(block, "require_crash", True))
     candidates = [f for f in verified if asan_verify.should_try(f, cfg)]
     max_findings = _asan_limit(getattr(block, "max_findings", "all"), len(candidates))
     skipped = len(verified) - len(candidates)
@@ -256,21 +295,36 @@ def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[
     attempted = 0
     gated_but_unattempted = 0
     shared_build = None
+    asan_started = time.monotonic()
+    asan_completed = 0
+
+    def _asan_progress(status: str) -> None:
+        nonlocal asan_completed
+        asan_completed += 1
+        print(f"  [s6-progress] ASAN completed={asan_completed}/{len(verified)} "
+              f"result={status} retained={len(out)} dropped={len(dropped)} "
+              f"elapsed={time.monotonic() - asan_started:.1f}s",
+              file=sys.stderr, flush=True)
+
     for f in verified:
         if not asan_verify.should_try(f, cfg):
-            out.append(f)
+            dropped.append(_drop(
+                f, "UNCONFIRMED",
+                "ASAN crash required, but the finding is not eligible under "
+                "the active ASAN class policy",
+                stage="asan",
+            ))
+            _asan_progress("class_ineligible")
             continue
         if attempted >= max_findings:
             gated_but_unattempted += 1
-            if require_crash:
-                dropped.append(_drop(
-                    f,
-                    "UNCONFIRMED",
-                    "ASAN verification required but per-run ASAN attempt budget was exhausted",
-                    stage="asan",
-                ))
-            else:
-                out.append(f)
+            dropped.append(_drop(
+                f,
+                "UNCONFIRMED",
+                "ASAN verification required but per-run ASAN attempt budget was exhausted",
+                stage="asan",
+            ))
+            _asan_progress("budget_excluded")
             continue
         attempted += 1
         bug_idx = attempted
@@ -289,12 +343,10 @@ def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[
                 "asan_repro_command": "",
                 "asan_artifacts": artifacts,
             })
-            if require_crash:
-                dropped.append(_drop(f2, "UNCONFIRMED", _asan_drop_detail("ASAN repo build failed; dynamic repro was skipped", shared_build.summary), stage="asan"))
-            else:
-                out.append(f2)
+            dropped.append(_drop(f2, "UNCONFIRMED", _asan_drop_detail("ASAN repo build failed; dynamic repro was skipped", shared_build.summary), stage="asan"))
             print(f"    [s6-asan] bug{bug_idx} no_crash (repo build failed)",
                   file=sys.stderr)
+            _asan_progress("build_failed")
             continue
         print(f"    [s6-asan] bug{bug_idx} reproducing {f.file}:{f.line_start}",
               file=sys.stderr)
@@ -307,11 +359,12 @@ def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[
             "asan_repro_command": asan.repro_command,
             "asan_artifacts": artifacts,
         })
-        if require_crash and not asan.crashed:
+        if not asan.crashed:
             dropped.append(_drop(f2, "UNCONFIRMED", _asan_drop_detail("ASAN did not confirm a crash/repro within the per-bug budget", asan.summary), stage="asan"))
         else:
             out.append(f2)
         print(f"    [s6-asan] bug{bug_idx} {status}", file=sys.stderr)
+        _asan_progress(status)
     if attempted or gated_but_unattempted:
         print(
             f"  [s6-asan] gate attempted {attempted}/{len(candidates)} selected finding(s), "
@@ -473,6 +526,15 @@ def _parse_verdict(raw: str) -> tuple[str, int, str, str | None, str]:
 
 def _drop(f: Finding, reason: str, detail: str, *,
           stage: str = "static") -> DroppedFinding:
+    evidence_finding = None
+    if stage == "asan" and reason == "UNCONFIRMED":
+        # Static review is provisional. Never serialize an ASAN-unconfirmed
+        # candidate with the literal TRUE_POSITIVE verdict.
+        evidence_finding = f.model_copy(update={
+            "verdict": None,
+            "verdict_confidence": None,
+            "verdict_reason": "",
+        })
     return DroppedFinding(
         file=f.file,
         line=f.line_start,
@@ -482,5 +544,5 @@ def _drop(f: Finding, reason: str, detail: str, *,
         reason=reason,
         detail=detail,
         verification_stage=stage,
-        finding=(f if stage == "asan" and reason == "UNCONFIRMED" else None),
+        finding=evidence_finding,
     )

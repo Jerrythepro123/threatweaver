@@ -26,7 +26,7 @@ from types import SimpleNamespace
 import pytest
 
 from vvaharness.models import ContextPackage, Finding, VulnClass
-from vvaharness.pipeline.stages import s6_verify
+from vvaharness.pipeline.stages import asan_verify, s6_verify
 from vvaharness.backends import claude_cli as cli
 from vvaharness.backends.claude_cli import GuardrailBlocked
 
@@ -220,10 +220,32 @@ def test_parse_verdict_accepts_30_vector():
 # run() — empty short-circuit
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_run_empty_returns_empty():
+def test_run_empty_returns_empty(capsys):
     verified, dropped = s6_verify.run([], _ctx(), _cfg())
     assert verified == []
     assert dropped == []
+    stderr = capsys.readouterr().err
+    assert "[s6-progress] STATIC SKIP candidates=0 reason=no-findings" in stderr
+    assert "[s6-progress] ASAN SKIP candidates=0 reason=no-static-tp" in stderr
+
+
+def test_static_run_reports_aggregate_progress(monkeypatch, capsys):
+    finding = _finding()
+
+    monkeypatch.setattr(
+        s6_verify, "_verify_one",
+        lambda _idx, candidate, _ctx, _cfg: candidate.model_copy(update={
+            "verdict": "TRUE_POSITIVE", "verdict_confidence": 9,
+            "verdict_reason": "confirmed",
+        }))
+
+    verified, dropped = s6_verify.run_static([finding], _ctx(), _cfg())
+
+    assert len(verified) == 1
+    assert dropped == []
+    stderr = capsys.readouterr().err
+    assert "[s6-progress] STATIC completed=1/1 running=0 queued=0" in stderr
+    assert "result=true_positive tp=1 dropped=0" in stderr
 
 
 def test_static_phase_does_not_invoke_asan(monkeypatch):
@@ -255,6 +277,78 @@ def test_asan_phase_does_not_invoke_static_verifier(monkeypatch):
     verified, dropped = s6_verify.run_asan([finding], _ctx(), _cfg())
 
     assert verified == [finding]
+    assert dropped == []
+
+
+def _asan_required_cfg(**overrides):
+    block = dict(
+        enabled=True, all_classes=True, classes=[], max_findings="all",
+        require_crash=False,
+    )
+    block.update(overrides)
+    return _cfg(asan=SimpleNamespace(**block))
+
+
+def test_asan_mode_drops_ineligible_static_verdict(monkeypatch):
+    finding = _finding(verdict="TRUE_POSITIVE", verdict_confidence=9)
+    monkeypatch.setattr(s6_verify.asan_verify, "should_try", lambda *_: False)
+
+    verified, dropped = s6_verify.run_asan(
+        [finding], _ctx(), _asan_required_cfg())
+
+    assert verified == []
+    assert len(dropped) == 1
+    assert dropped[0].reason == "UNCONFIRMED"
+    assert dropped[0].verification_stage == "asan"
+    assert dropped[0].finding is not None
+    assert dropped[0].finding.verdict is None
+
+
+def test_asan_mode_never_retains_no_crash_even_if_config_disables_gate(
+        monkeypatch):
+    finding = _finding(verdict="TRUE_POSITIVE", verdict_confidence=9)
+    monkeypatch.setattr(s6_verify.asan_verify, "should_try", lambda *_: True)
+    monkeypatch.setattr(
+        s6_verify.asan_verify, "build_repo",
+        lambda *_args, **_kwargs: asan_verify.AsanBuildResult(
+            True, "ASAN_REPO_BUILD_OK"),
+    )
+    monkeypatch.setattr(
+        s6_verify.asan_verify, "run",
+        lambda *_args, **_kwargs: asan_verify.AsanResult(
+            attempted=True, crashed=False, summary="NO_ASAN_CRASH"),
+    )
+
+    verified, dropped = s6_verify.run_asan(
+        [finding], _ctx(), _asan_required_cfg(require_crash=False))
+
+    assert verified == []
+    assert len(dropped) == 1
+    assert dropped[0].reason == "UNCONFIRMED"
+    assert dropped[0].finding is not None
+    assert dropped[0].finding.verdict is None
+
+
+def test_asan_mode_retains_only_crash_confirmed_finding(monkeypatch):
+    finding = _finding(verdict="TRUE_POSITIVE", verdict_confidence=9)
+    monkeypatch.setattr(s6_verify.asan_verify, "should_try", lambda *_: True)
+    monkeypatch.setattr(
+        s6_verify.asan_verify, "build_repo",
+        lambda *_args, **_kwargs: asan_verify.AsanBuildResult(
+            True, "ASAN_REPO_BUILD_OK"),
+    )
+    monkeypatch.setattr(
+        s6_verify.asan_verify, "run",
+        lambda *_args, **_kwargs: asan_verify.AsanResult(
+            attempted=True, crashed=True, summary="ASAN_CRASH"),
+    )
+
+    verified, dropped = s6_verify.run_asan(
+        [finding], _ctx(), _asan_required_cfg(require_crash=False))
+
+    assert len(verified) == 1
+    assert verified[0].verdict == "TRUE_POSITIVE"
+    assert verified[0].asan_status == "crash_confirmed"
     assert dropped == []
 
 

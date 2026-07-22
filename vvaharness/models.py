@@ -696,8 +696,8 @@ class DroppedFinding(BaseModel):
     detail: str = ""                 # verdict_reason / error text / dedup reasoning
     canonical_idx: int | None = None # for DUPLICATE: index into FinalReport.findings
     verification_stage: Literal["static", "asan"] | None = None
-    # ASAN-unconfirmed findings remain statically verified vulnerabilities and
-    # need the complete evidence bundle for the dedicated report.  Older
+    # ASAN-unconfirmed findings remain provisional static candidates and need
+    # the complete evidence bundle for the dedicated report.  Older
     # checkpoints remain valid because both new fields are optional.
     finding: Finding | None = None
 
@@ -944,7 +944,7 @@ class FinalReport(BaseModel):
         return "\n".join(out)
 
     def to_unconfirmed_markdown(self) -> str:
-        """Render statically verified findings not runtime-confirmed by ASAN.
+        """Render provisional static candidates not runtime-confirmed by ASAN.
 
         This intentionally uses a filename outside the ``*_report.md`` glob;
         remediation must continue discovering only the successful-findings
@@ -959,17 +959,17 @@ class FinalReport(BaseModel):
                 and dropped.finding is not None)
         ]
         out = [
-            f"# Agentic SAST — {safe_title} — ASAN-Unconfirmed Vulnerabilities",
+            f"# Agentic SAST — {safe_title} — ASAN-Unconfirmed Candidates",
             "",
             "## Summary",
             "",
-            "These findings passed adversarial static verification and must be "
-            "treated as real vulnerabilities. ASAN did not produce runtime "
-            "confirmation within the configured build/reproduction budget; that "
-            "absence is not a false-positive verdict.",
+            "These candidates passed provisional adversarial static review, but "
+            "ASAN did not produce runtime confirmation within the configured "
+            "build/reproduction budget. They are not true positives unless a "
+            "sanitizer crash is reproduced.",
             "",
-            f"- ASAN-unconfirmed vulnerabilities: {len(asan_unconfirmed)}",
-            "- Required disposition: remediate or manually reproduce",
+            f"- ASAN-unconfirmed candidates: {len(asan_unconfirmed)}",
+            "- Required disposition: manually reproduce before confirmation",
             "",
         ]
 
@@ -992,12 +992,16 @@ class FinalReport(BaseModel):
 
         ranked = [
             RankedFinding(
-                finding=dropped.finding,
+                finding=dropped.finding.model_copy(update={
+                    "verdict": None,
+                    "verdict_confidence": None,
+                    "verdict_reason": "",
+                }),
                 severity=_severity(dropped.finding),
                 exploitability_notes=(
-                    "Adversarial static verification confirmed this vulnerability. "
-                    "ASAN runtime confirmation was not obtained; remediation is "
-                    f"still required. {dropped.detail}"),
+                    "Static review identified a plausible vulnerability, but "
+                    "ASAN runtime confirmation was not obtained. This candidate "
+                    f"is not a confirmed true positive. {dropped.detail}"),
             )
             for dropped in asan_unconfirmed
         ]

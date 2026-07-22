@@ -10,7 +10,7 @@
 
 import inspect
 
-from vvaharness.orchestrator.scan import scan_repo
+from vvaharness.orchestrator.scan import _log_stage456_counts, scan_repo
 
 
 def test_scan_repo_does_not_invoke_remediation_or_validation():
@@ -29,3 +29,12 @@ def test_scan_repo_checkpoints_static_and_asan_verification_separately():
     assert 'save_ckpt(ckpt_dir, run_id, "s6-asan"' in source
     assert "s6_verify.run_static(" in source
     assert "s6_verify.run_asan(" in source
+
+
+def test_standard_stage456_count_snapshot(capsys):
+    _log_stage456_counts(
+        "dynamic", findings=12, static_confirmed=7, dynamic_confirmed=4)
+
+    assert capsys.readouterr().err.strip() == (
+        "[stage456-progress] phase=dynamic findings=12 "
+        "static_confirmed=7 dynamic_confirmed=4")

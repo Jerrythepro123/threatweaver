@@ -30,7 +30,7 @@ def _finding(file: str, vuln_class: VulnClass) -> Finding:
     )
 
 
-def _run(*findings: Finding, allowed_classes=None):
+def _run(*findings: Finding, allowed_classes=None, asan=None):
     ctx = ContextPackage(
         repo_root="/repo", language="c-cpp",
         all_files=[finding.file for finding in findings],
@@ -39,6 +39,7 @@ def _run(*findings: Finding, allowed_classes=None):
         step5_prefilter=SimpleNamespace(
             min_pre_confidence=0.0, require_evidence=False,
             allowed_classes=allowed_classes),
+        step6_verify=SimpleNamespace(asan=asan),
         step7_dedup=SimpleNamespace(
             line_tolerance=10, pre_verify_threshold=0, semantic=False),
     )
@@ -110,8 +111,52 @@ def test_configured_policy_keeps_non_memory_c_cpp_findings(vuln_class):
     assert dropped == []
 
 
+def test_required_asan_policy_drops_class_not_selected_for_runtime_verification():
+    finding = _finding("src/parser.cpp", VulnClass.LOGIC)
+    asan = SimpleNamespace(
+        enabled=True, all_classes=False,
+        classes=[VulnClass.HEAP_OVERFLOW.value],
+    )
+
+    kept, dropped = _run(
+        finding, allowed_classes=[VulnClass.LOGIC.value], asan=asan)
+
+    assert kept == []
+    assert len(dropped) == 1
+    assert dropped[0].reason == "EXCLUDED"
+    assert dropped[0].detail == (
+        "vulnerability class not eligible for required ASAN verification")
+
+
+def test_required_asan_policy_keeps_explicitly_selected_class():
+    finding = _finding("src/parser.cpp", VulnClass.OTHER)
+    asan = SimpleNamespace(
+        enabled=True, all_classes=False, classes=[VulnClass.OTHER.value],
+    )
+
+    kept, dropped = _run(
+        finding, allowed_classes=[VulnClass.OTHER.value], asan=asan)
+
+    assert kept == [finding]
+    assert dropped == []
+
+
 def test_invalid_configured_class_fails_loudly():
     finding = _finding("src/parser.cpp", VulnClass.LOGIC)
 
     with pytest.raises(ValueError, match="invalid step5_prefilter.allowed_classes"):
         _run(finding, allowed_classes=["not-a-real-class"])
+
+
+def test_run_reports_filter_phase_progress(capsys):
+    finding = _finding("src/parser.cpp", VulnClass.HEAP_OVERFLOW)
+
+    kept, dropped = _run(finding)
+
+    assert kept == [finding]
+    assert dropped == []
+    stderr = capsys.readouterr().err
+    assert "[s5-progress] START candidates=1" in stderr
+    assert "[s5-progress] POLICY completed=1/1 kept=1 dropped=0" in stderr
+    assert "[s5-progress] STRUCTURAL-DEDUP input=1 kept=1 dropped=0" in stderr
+    assert "[s5-progress] DONE input=1 kept=1 dropped=0" in stderr

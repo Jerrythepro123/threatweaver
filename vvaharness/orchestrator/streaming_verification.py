@@ -98,6 +98,126 @@ def _heartbeat(label: str, audit_active: Event, *, interval: int = 30):
         thread.join(timeout=1)
 
 
+class _StreamProgress:
+    """Atomic aggregate progress lines for the overlapping s5/s6 pipeline."""
+
+    def __init__(self, audit_active: Event) -> None:
+        self.audit_active = audit_active
+        self.started = time.monotonic()
+        self.lock = Lock()
+        self.s5_received = 0
+        self.s5_eligible = 0
+        self.s5_filtered = 0
+        self.static_queued = 0
+        self.static_running = 0
+        self.static_completed = 0
+        self.static_tp = 0
+        self.static_dropped = 0
+        self.asan_queued = 0
+        self.asan_running = 0
+        self.asan_completed = 0
+        self.dynamic_confirmed = 0
+
+    def s5_batch(self, received: int, eligible: int) -> None:
+        with self.lock:
+            self.s5_received += received
+            self.s5_eligible += eligible
+            self.s5_filtered += received - eligible
+            print(f"  [s5-progress] STREAM received={self.s5_received} "
+                  f"eligible={self.s5_eligible} filtered={self.s5_filtered} "
+                  f"audit={_audit_state(self.audit_active)}",
+                  file=sys.stderr, flush=True)
+            self._stage456("findings")
+
+    def static_submit(self) -> None:
+        with self.lock:
+            self.static_queued += 1
+            self._static("submitted")
+
+    def static_cancel(self) -> None:
+        with self.lock:
+            self.static_queued = max(0, self.static_queued - 1)
+            self._static("submit_failed")
+
+    def static_start(self) -> None:
+        with self.lock:
+            self.static_queued = max(0, self.static_queued - 1)
+            self.static_running += 1
+            self._static("started")
+
+    def static_done(self, result: str) -> None:
+        with self.lock:
+            self.static_running = max(0, self.static_running - 1)
+            self.static_completed += 1
+            if result == "TRUE_POSITIVE":
+                self.static_tp += 1
+            else:
+                self.static_dropped += 1
+            self._static(f"completed:{result.lower()}")
+            self._stage456("static")
+
+    def _static(self, event: str) -> None:
+        print(f"  [s6-progress] STATIC event={event} "
+              f"queued={self.static_queued} running={self.static_running} "
+              f"completed={self.static_completed} tp={self.static_tp} "
+              f"dropped={self.static_dropped} elapsed={_elapsed(self.started)} "
+              f"audit={_audit_state(self.audit_active)}",
+              file=sys.stderr, flush=True)
+
+    def asan_queue(self) -> None:
+        with self.lock:
+            self.asan_queued += 1
+            self._asan("queued")
+
+    def asan_start(self) -> None:
+        with self.lock:
+            self.asan_queued = max(0, self.asan_queued - 1)
+            self.asan_running += 1
+            self._asan("started")
+
+    def asan_done(self, result: str) -> None:
+        with self.lock:
+            self.asan_running = max(0, self.asan_running - 1)
+            self.asan_completed += 1
+            if result == "retained":
+                # In ASAN mode, retained means a crash-confirmed finding.
+                self.dynamic_confirmed += 1
+            self._asan(f"completed:{result}")
+            self._stage456("dynamic")
+
+    def _asan(self, event: str) -> None:
+        print(f"  [s6-progress] ASAN event={event} queued={self.asan_queued} "
+              f"running={self.asan_running} completed={self.asan_completed} "
+              f"elapsed={_elapsed(self.started)} "
+              f"audit={_audit_state(self.audit_active)}",
+              file=sys.stderr, flush=True)
+
+    def _stage456(self, event: str) -> None:
+        print(f"  [stage456-progress] event={event} "
+              f"findings={self.s5_received} "
+              f"static_confirmed={self.static_tp} "
+              f"dynamic_confirmed={self.dynamic_confirmed} "
+              f"audit={_audit_state(self.audit_active)}",
+              file=sys.stderr, flush=True)
+
+    def finish(self, *, findings: int, static_confirmed: int,
+               dynamic_confirmed: int, asan_enabled: bool) -> None:
+        with self.lock:
+            print(f"  [s6-progress] DONE static_completed={self.static_completed} "
+                  f"static_tp={self.static_tp} "
+                  f"static_dropped={self.static_dropped} "
+                  f"asan_completed={self.asan_completed} "
+                  f"asan={'enabled' if asan_enabled else 'disabled'} "
+                  f"elapsed={_elapsed(self.started)}",
+                  file=sys.stderr, flush=True)
+            print(f"  [stage456-progress] DONE findings={findings} "
+                  f"static_confirmed={static_confirmed} "
+                  f"dynamic_confirmed={dynamic_confirmed} "
+                  f"asan={'enabled' if asan_enabled else 'disabled'} "
+                  f"elapsed={_elapsed(self.started)}",
+                  file=sys.stderr, flush=True)
+
+
 def run(chunks, ctx: ContextPackage, cfg) -> StreamResult:
     """Stream locally admissible s4 candidates into static s6 verification.
 
@@ -111,10 +231,11 @@ def run(chunks, ctx: ContextPackage, cfg) -> StreamResult:
     slots = BoundedSemaphore(max_in_flight)
     audit_active = Event()
     audit_active.set()
+    progress = _StreamProgress(audit_active)
     dispatcher_abort = Event()
     executor = ThreadPoolExecutor(max_workers=parallel,
                                   thread_name_prefix="streaming-verify")
-    asan_session = _StreamingAsanSession(ctx, cfg, audit_active)
+    asan_session = _StreamingAsanSession(ctx, cfg, audit_active, progress)
     asan_executor = (ThreadPoolExecutor(max_workers=1,
                                         thread_name_prefix="streaming-asan")
                      if asan_verify.enabled(cfg) else None)
@@ -139,11 +260,13 @@ def run(chunks, ctx: ContextPackage, cfg) -> StreamResult:
                 raise RuntimeError("streaming verifier dispatcher aborted")
         idx = next_index
         next_index += 1
+        progress.static_submit()
         try:
             future = executor.submit(
                 _verify_and_schedule_asan, idx, finding, ctx, cfg,
-                asan_executor, asan_session, audit_active)
+                asan_executor, asan_session, audit_active, progress)
         except BaseException:
+            progress.static_cancel()
             slots.release()
             raise
         future.add_done_callback(_release)
@@ -171,6 +294,7 @@ def run(chunks, ctx: ContextPackage, cfg) -> StreamResult:
                 # population is known.  Global dedup remains authoritative.
                 eligible, _ = s5_prefilter.policy_filter(
                     batch, ctx, cfg, announce=False)
+                progress.s5_batch(len(batch), len(eligible))
                 for finding in eligible:
                     idx = _submit(finding)
                     print(f"  [streaming-verification] STATIC SUBMITTED "
@@ -215,6 +339,14 @@ def run(chunks, ctx: ContextPackage, cfg) -> StreamResult:
         }
         static_verified, static_dropped, verified, asan_dropped = _collect(
             selected, cfg)
+        progress.finish(
+            findings=len(findings),
+            static_confirmed=len(static_verified),
+            dynamic_confirmed=sum(
+                finding.asan_status == "crash_confirmed"
+                for finding in verified),
+            asan_enabled=asan_executor is not None,
+        )
         speculative = len(submitted) - len(selected)
         print(f"  [streaming-verification] static verification complete: "
               f"{len(selected)} authoritative, {speculative} speculative",
@@ -247,15 +379,18 @@ def _verify_and_schedule_asan(idx: int, finding: Finding,
                               ctx: ContextPackage, cfg,
                               asan_executor: ThreadPoolExecutor | None,
                               asan_session: "_StreamingAsanSession",
-                              audit_active: Event):
+                              audit_active: Event,
+                              progress: _StreamProgress):
     """Run static verification and immediately continue a TP into ASAN."""
     started = time.monotonic()
+    progress.static_start()
     print(f"    [streaming-static] START bug#{idx + 1} "
           f"{_finding_label(finding)} audit={_audit_state(audit_active)}",
           file=sys.stderr, flush=True)
     try:
         result = s6_verify._verify_one(idx, finding, ctx, cfg)
     except BaseException:
+        progress.static_done("error")
         print(f"    [streaming-static] DONE bug#{idx + 1} result=error "
               f"elapsed={_elapsed(started)} audit={_audit_state(audit_active)}",
               file=sys.stderr, flush=True)
@@ -265,6 +400,11 @@ def _verify_and_schedule_asan(idx: int, finding: Finding,
           f"elapsed={_elapsed(started)} audit={_audit_state(audit_active)}",
           file=sys.stderr, flush=True)
     min_conf = getattr(cfg.step6_verify, "min_confidence", 7)
+    static_result = ("TRUE_POSITIVE"
+                     if result.verdict == "TRUE_POSITIVE"
+                     and (result.verdict_confidence or 0) >= min_conf
+                     else result.verdict or "unconfirmed")
+    progress.static_done(static_result)
     asan_future = None
     if (asan_executor is not None
             and result.verdict == "TRUE_POSITIVE"
@@ -276,6 +416,7 @@ def _verify_and_schedule_asan(idx: int, finding: Finding,
                   file=sys.stderr, flush=True)
         else:
             position, build_state, active = asan_session.reserve(idx)
+            progress.asan_queue()
             print(f"    [streaming-verification] ASAN QUEUED bug#{idx + 1} "
                   f"position={position} build={build_state} active={active} "
                   f"{_finding_label(result)} audit={_audit_state(audit_active)}",
@@ -287,10 +428,12 @@ def _verify_and_schedule_asan(idx: int, finding: Finding,
 class _StreamingAsanSession:
     """One serialized ASAN build/repro session shared by streamed findings."""
 
-    def __init__(self, ctx: ContextPackage, cfg, audit_active: Event) -> None:
+    def __init__(self, ctx: ContextPackage, cfg, audit_active: Event,
+                 progress: _StreamProgress) -> None:
         self.ctx = ctx
         self.cfg = cfg
         self.audit_active = audit_active
+        self.progress = progress
         self.build = None
         self.build_state = "pending"
         self.attempted = 0
@@ -298,7 +441,6 @@ class _StreamingAsanSession:
         self._waiting = 0
         self._active: int | None = None
         block = getattr(cfg.step6_verify, "asan", None)
-        self.require_crash = bool(getattr(block, "require_crash", True))
         raw_limit = getattr(block, "max_findings", "all")
         self.limit = s6_verify._asan_limit(raw_limit, 1_000_000_000)
 
@@ -314,9 +456,15 @@ class _StreamingAsanSession:
         with self._state_lock:
             self._waiting = max(0, self._waiting - 1)
             self._active = idx
+        self.progress.asan_start()
+        status = "error"
         try:
-            return self._verify(finding, idx)
+            kept, dropped = self._verify(finding, idx)
+            status = "retained" if kept is not None else (
+                (dropped.reason if dropped is not None else "dropped").lower())
+            return kept, dropped
         finally:
+            self.progress.asan_done(status)
             with self._state_lock:
                 self._active = None
 
@@ -326,17 +474,19 @@ class _StreamingAsanSession:
             print(f"    [streaming-asan] SKIP bug#{idx + 1} "
                   f"reason=class-not-enabled class={finding.vuln_class.value}",
                   file=sys.stderr, flush=True)
-            return finding, None
+            return None, s6_verify._drop(
+                finding, "UNCONFIRMED",
+                "ASAN crash required, but the finding is not eligible under "
+                "the active ASAN class policy",
+                stage="asan")
         if self.attempted >= self.limit:
             print(f"    [streaming-asan] SKIP bug#{idx + 1} "
                   "reason=max-findings-budget-exhausted",
                   file=sys.stderr, flush=True)
-            if self.require_crash:
-                return None, s6_verify._drop(
-                    finding, "UNCONFIRMED",
-                    "ASAN verification required but per-run ASAN attempt "
-                    "budget was exhausted", stage="asan")
-            return finding, None
+            return None, s6_verify._drop(
+                finding, "UNCONFIRMED",
+                "ASAN verification required but per-run ASAN attempt "
+                "budget was exhausted", stage="asan")
 
         self.attempted += 1
         bug_idx = self.attempted
@@ -367,13 +517,11 @@ class _StreamingAsanSession:
                 "asan_repro_command": "",
                 "asan_artifacts": artifacts,
             })
-            if self.require_crash:
-                return None, s6_verify._drop(
-                    updated, "UNCONFIRMED",
-                    s6_verify._asan_drop_detail(
-                        "ASAN repo build failed; dynamic repro was skipped",
-                        self.build.summary), stage="asan")
-            return updated, None
+            return None, s6_verify._drop(
+                updated, "UNCONFIRMED",
+                s6_verify._asan_drop_detail(
+                    "ASAN repo build failed; dynamic repro was skipped",
+                    self.build.summary), stage="asan")
 
         started = time.monotonic()
         print(f"    [streaming-asan] START bug#{idx + 1} attempt={bug_idx} "
@@ -394,7 +542,7 @@ class _StreamingAsanSession:
         print(f"    [streaming-asan] DONE bug#{idx + 1} result={status} "
               f"elapsed={_elapsed(started)} audit={_audit_state(self.audit_active)}",
               file=sys.stderr, flush=True)
-        if self.require_crash and not result.crashed:
+        if not result.crashed:
             return None, s6_verify._drop(
                 updated, "UNCONFIRMED",
                 s6_verify._asan_drop_detail(
@@ -448,7 +596,14 @@ def _collect(futures: dict[Future, tuple[int, Finding]], cfg
                 and (result.verdict_confidence or 0) >= min_conf):
             static_verified.append((idx, result))
             if asan_future is None:
-                verified.append((idx, result))
+                if asan_verify.enabled(cfg):
+                    asan_dropped.append((idx, s6_verify._drop(
+                        result, "UNCONFIRMED",
+                        "ASAN crash required, but runtime verification was "
+                        "not scheduled for this finding",
+                        stage="asan")))
+                else:
+                    verified.append((idx, result))
             else:
                 try:
                     retained, dynamic_drop = asan_future.result()

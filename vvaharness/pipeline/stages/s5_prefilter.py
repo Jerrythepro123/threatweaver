@@ -23,6 +23,8 @@ mechanically:
   - findings outside C/C++ source and header files
   - findings outside step5_prefilter.allowed_classes (defaults to the original
     low-level memory-safety classes for backward compatibility)
+  - findings outside the active ASAN class policy when runtime verification is
+    enabled; such findings can never satisfy the final true-positive gate
   - test/mock/example/fixture paths (model ignores the prompt rule ~10%)
   - hallucinated file paths not present in the repo inventory
   - s4 confidence below step5_prefilter.min_pre_confidence (legacy: step6_verify.min_pre_confidence)
@@ -39,10 +41,11 @@ checkpoint on --resume.
 from __future__ import annotations
 import re
 import sys
+import time
 
 from vvaharness.lang.hints import is_c_cpp_file
 from vvaharness.models import ContextPackage, Finding, DroppedFinding, VulnClass
-from . import s7_dedup
+from . import asan_verify, s7_dedup
 
 
 _EXCLUDE_PATH_RE = re.compile(
@@ -167,6 +170,11 @@ def policy_filter(findings: list[Finding], ctx: ContextPackage, cfg, *,
             _drop(f, "EXCLUDED", "not a C/C++ source or header file")
         elif f.vuln_class not in allowed_classes:
             _drop(f, "EXCLUDED", "vulnerability class not enabled by stage-5 policy")
+        elif asan_verify.enabled(cfg) and not asan_verify.should_try(f, cfg):
+            _drop(
+                f, "EXCLUDED",
+                "vulnerability class not eligible for required ASAN verification",
+            )
         elif in_test_path and not secret_class:
             _drop(f, "EXCLUDED", "test/mock/example path")
         elif valid_files is not None and f.file not in valid_files:
@@ -195,12 +203,22 @@ def policy_filter(findings: list[Finding], ctx: ContextPackage, cfg, *,
 
 def run(findings: list[Finding], ctx: ContextPackage, cfg
         ) -> tuple[list[Finding], list[DroppedFinding]]:
+    started = time.monotonic()
+    print(f"  [s5-progress] START candidates={len(findings)}",
+          file=sys.stderr, flush=True)
     keep, dropped = policy_filter(findings, ctx, cfg)
+    print(f"  [s5-progress] POLICY completed={len(findings)}/{len(findings)} "
+          f"kept={len(keep)} dropped={len(dropped)}",
+          file=sys.stderr, flush=True)
 
     s7d = getattr(cfg, "step7_dedup", None)
     line_tol = getattr(s7d, "line_tolerance", 10)
+    before_dedup = len(keep)
     keep, dup_dropped = s7_dedup.prefilter(keep, line_tol)
     dropped.extend(dup_dropped)
+    print(f"  [s5-progress] STRUCTURAL-DEDUP input={before_dedup} "
+          f"kept={len(keep)} dropped={len(dup_dropped)}",
+          file=sys.stderr, flush=True)
 
     # ── Semantic dedup BEFORE verify (triage §2b) ────────────────────────
     # One cheap dedup-model call here can save dozens of expensive s6 verifier
@@ -212,6 +230,9 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
         print(f"  [s5-prefilter] {len(keep)} survivors ≥ pre_verify_threshold "
               f"{pre_thresh} → running semantic dedup ahead of s6",
               file=sys.stderr)
+        semantic_input = len(keep)
+        print(f"  [s5-progress] SEMANTIC-DEDUP START candidates={semantic_input}",
+              file=sys.stderr, flush=True)
         keep, sem_dropped = s7_dedup.run(keep, cfg, label="s5-prefilter")
         for d in sem_dropped:
             # canonical_idx points into the *pre-verify* list and would be
@@ -219,6 +240,12 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
             d.canonical_idx = None
             d.detail = f"pre-verify semantic: {d.detail}"
         dropped.extend(sem_dropped)
+        print(f"  [s5-progress] SEMANTIC-DEDUP DONE input={semantic_input} "
+              f"kept={len(keep)} dropped={len(sem_dropped)}",
+              file=sys.stderr, flush=True)
+    else:
+        print(f"  [s5-progress] SEMANTIC-DEDUP SKIP candidates={len(keep)} "
+              f"threshold={pre_thresh}", file=sys.stderr, flush=True)
 
     if dropped:
         by: dict[str, int] = {}
@@ -230,4 +257,7 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
     else:
         print(f"  [s5-prefilter] {len(findings)} → {len(keep)} (nothing dropped)",
               file=sys.stderr)
+    print(f"  [s5-progress] DONE input={len(findings)} kept={len(keep)} "
+          f"dropped={len(dropped)} elapsed={time.monotonic() - started:.2f}s",
+          file=sys.stderr, flush=True)
     return keep, dropped

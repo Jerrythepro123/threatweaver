@@ -132,7 +132,7 @@ step4:
   neighbor_context_max: 6
 
 step5_prefilter:
-  min_pre_confidence: 0.8
+  min_pre_confidence: 0.85
   require_evidence: true
   allowed_classes:
     - use-after-free

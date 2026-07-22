@@ -54,6 +54,16 @@ def _head_sha(repo: Path) -> str | None:
         return None
 
 
+def _log_stage456_counts(phase: str, *, findings: int,
+                         static_confirmed: int = 0,
+                         dynamic_confirmed: int = 0) -> None:
+    """Emit one stable count snapshot for the standard s4/s5/s6 path."""
+    print(f"  [stage456-progress] phase={phase} findings={findings} "
+          f"static_confirmed={static_confirmed} "
+          f"dynamic_confirmed={dynamic_confirmed}",
+          file=sys.stderr, flush=True)
+
+
 def scan_repo(repo: Path, repo_name: str, application_id: str | None,
               args, cfg,
               path_prefix: str | None = None) -> tuple[Path | None, int]:
@@ -272,10 +282,11 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
         chunk_outcomes = s4_ckpt.get("outcomes", {})
     else:  # legacy bare-list checkpoint (pre outcome-tracking)
         findings = s4_ckpt
+    raw_count = len(findings)
+    if stream_result is None:
+        _log_stage456_counts("findings", findings=raw_count)
     if args.stop_after == "s4":
         return None, 0
-
-    raw_count = len(findings)
 
     # ── Steps 5+6+7 — Pre-filter + split verification + dedup ────────────
     s7_ckpt = load_ckpt(ckpt_dir, run_id, "s7") if args.resume else None
@@ -309,6 +320,13 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
         if args.stop_after == "s5":
             return None, 0
 
+        if stream_result is None:
+            _log_stage456_counts(
+                "static",
+                findings=raw_count,
+                static_confirmed=len(static_verified),
+            )
+
         asan_ckpt = ({
             "verified": stream_result.verified,
             "dropped": stream_result.asan_dropped,
@@ -327,6 +345,15 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
         else:
             verified = asan_ckpt["verified"]
             asan_dropped = asan_ckpt["dropped"]
+        if stream_result is None:
+            _log_stage456_counts(
+                "dynamic",
+                findings=raw_count,
+                static_confirmed=len(static_verified),
+                dynamic_confirmed=sum(
+                    finding.asan_status == "crash_confirmed"
+                    for finding in verified),
+            )
         dropped = static_dropped + asan_dropped
         if args.stop_after == "s6":
             return None, 0

@@ -262,6 +262,10 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg,
     audit_started = time.monotonic()
     completed_chunks = 0
 
+    print(f"  [s4-progress] START total={len(chunks)} parallel={parallel} "
+          f"runs={runs_n} vote_threshold={threshold}",
+          file=sys.stderr, flush=True)
+
     def _duration(seconds: float) -> str:
         seconds = max(0, int(seconds))
         minutes, secs = divmod(seconds, 60)
@@ -277,13 +281,27 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg,
         completed_chunks += 1
         elapsed = time.monotonic() - audit_started
         remaining = len(chunks) - completed_chunks
+        active = min(max(1, parallel), remaining)
+        queued = max(0, remaining - active)
         eta = ((elapsed / completed_chunks) * remaining
                if completed_chunks else 0.0)
         pct = (completed_chunks / len(chunks) * 100) if chunks else 100.0
         print(f"  [s4-progress] {completed_chunks}/{len(chunks)} chunks "
               f"({pct:.0f}%) outcome={outcome} last={chunk.id} "
+              f"active={active} queued={queued} "
               f"elapsed={_duration(elapsed)} eta={_duration(eta)}",
               file=sys.stderr, flush=True)
+
+    def _finish(items: list[Finding]
+                ) -> tuple[list[Finding], dict[str, str]]:
+        collapsed = _collapse_across_chunks(items, cfg.step4.line_bucket)
+        failures = sum(1 for value in outcomes.values()
+                       if value != "completed")
+        print(f"  [s4-progress] DONE chunks={completed_chunks}/{len(chunks)} "
+              f"findings={len(collapsed)} coverage_failures={failures} "
+              f"elapsed={_duration(time.monotonic() - audit_started)}",
+              file=sys.stderr, flush=True)
+        return collapsed, outcomes
 
     def _guardrail_fail_fast(e: GuardrailBlocked) -> None:
         raise RuntimeError(
@@ -328,7 +346,7 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg,
                   file=sys.stderr)
             _progress(chunk, "completed")
             all_findings.extend(findings)
-        return _collapse_across_chunks(all_findings, cfg.step4.line_bucket), outcomes
+        return _finish(all_findings)
 
     print(f"  [s4] processing {len(chunks)} chunks ({parallel} parallel)...",
           file=sys.stderr)
@@ -386,7 +404,7 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg,
     all_findings: list[Finding] = []
     for chunk in chunks:
         all_findings.extend(results.get(chunk.id, []))
-    return _collapse_across_chunks(all_findings, cfg.step4.line_bucket), outcomes
+    return _finish(all_findings)
 
 
 def _deepdive_chunk(chunk: Chunk, ctx: ContextPackage, repo_root: Path, cfg,

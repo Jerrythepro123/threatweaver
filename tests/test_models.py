@@ -455,13 +455,14 @@ def test_unconfirmed_report_contains_only_full_asan_unconfirmed_findings():
 
     md = report.to_unconfirmed_markdown()
 
-    assert "ASAN-unconfirmed vulnerabilities: 1" in md
+    assert "ASAN-unconfirmed candidates: 1" in md
     assert "heap overflow in parse" in md
     assert "#### Description" in md
     assert "#### Impact" in md
     assert "#### Exploit scenario" in md
     assert "#### How to fix" in md
-    assert "#### Adversarial verification" in md
+    assert "#### Adversarial verification" not in md
+    assert "TRUE_POSITIVE" not in md
     assert "#### ASAN runtime evidence" in md
     assert "excluded candidate" not in md
     assert "low-confidence static candidate" not in md

@@ -142,7 +142,7 @@ def test_s4_emits_only_final_voted_representative(monkeypatch, tmp_path):
     assert survivors == [high]
 
 
-def test_asan_starts_before_s4_returns(monkeypatch):
+def test_asan_starts_before_s4_returns(monkeypatch, capsys):
     """Prove the dynamic verifier overlaps an auditor that is still running."""
     finding = _finding()
     asan_started = Event()
@@ -192,6 +192,50 @@ def test_asan_starts_before_s4_returns(monkeypatch):
     assert s4_returned.is_set()
     assert len(result.verified) == 1
     assert result.verified[0].asan_status == "crash_confirmed"
+    assert "[stage456-progress] DONE findings=1 static_confirmed=1 " \
+           "dynamic_confirmed=1" in capsys.readouterr().err
+
+
+def test_streaming_never_retains_no_crash_even_if_config_disables_gate(
+        monkeypatch):
+    finding = _finding()
+    cfg = _cfg()
+    cfg.step6_verify.asan = SimpleNamespace(
+        enabled=True, all_classes=True, require_crash=False,
+        max_findings="all")
+
+    def fake_s4(_chunks, _ctx, _cfg, on_findings=None):
+        assert on_findings is not None
+        on_findings([finding])
+        return [finding], {"chunk-1": "completed"}
+
+    def fake_verify(_idx, candidate, _ctx, _cfg):
+        return candidate.model_copy(update={
+            "verdict": "TRUE_POSITIVE", "verdict_confidence": 9,
+            "verdict_reason": "provisional static verdict",
+        })
+
+    monkeypatch.setattr(streaming_verification.s4_deepdive, "run", fake_s4)
+    monkeypatch.setattr(streaming_verification.s6_verify, "_verify_one", fake_verify)
+    monkeypatch.setattr(
+        streaming_verification.asan_verify, "build_repo",
+        lambda *_args, **_kwargs: asan_verify.AsanBuildResult(
+            True, "ASAN_REPO_BUILD_OK"),
+    )
+    monkeypatch.setattr(
+        streaming_verification.asan_verify, "run",
+        lambda *_args, **_kwargs: asan_verify.AsanResult(
+            attempted=True, crashed=False, summary="NO_ASAN_CRASH"),
+    )
+
+    result = streaming_verification.run([object()], _ctx(), cfg)
+
+    assert result.static_verified[0].verdict == "TRUE_POSITIVE"
+    assert result.verified == []
+    assert len(result.asan_dropped) == 1
+    assert result.asan_dropped[0].reason == "UNCONFIRMED"
+    assert result.asan_dropped[0].finding is not None
+    assert result.asan_dropped[0].finding.verdict is None
 
 
 def test_full_s5_selection_is_authoritative(monkeypatch):
@@ -230,3 +274,61 @@ def test_experimental_flag_is_advertised(capsys):
         entry.main(["--help"])
     assert exc.value.code == 0
     assert "--experimental-streaming-verification" in capsys.readouterr().out
+
+
+def test_streaming_reports_stage5_and_stage6_progress(monkeypatch, capsys):
+    finding = _finding()
+
+    def fake_s4(_chunks, _ctx, _cfg, on_findings=None):
+        assert on_findings is not None
+        on_findings([finding])
+        return [finding], {"chunk-1": "completed"}
+
+    def fake_verify(_idx, candidate, _ctx, _cfg):
+        return candidate.model_copy(update={
+            "verdict": "TRUE_POSITIVE", "verdict_confidence": 9,
+            "verdict_reason": "confirmed",
+        })
+
+    monkeypatch.setattr(streaming_verification.s4_deepdive, "run", fake_s4)
+    monkeypatch.setattr(streaming_verification.s6_verify, "_verify_one", fake_verify)
+
+    streaming_verification.run([object()], _ctx(), _cfg())
+
+    stderr = capsys.readouterr().err
+    assert "[s5-progress] STREAM received=1 eligible=1 filtered=0" in stderr
+    assert "[s6-progress] STATIC event=submitted" in stderr
+    assert "[s6-progress] STATIC event=started" in stderr
+    assert "[s6-progress] STATIC event=completed:true_positive" in stderr
+    assert "queued=0 running=0 completed=1 tp=1 dropped=0" in stderr
+    assert "[s6-progress] DONE static_completed=1 static_tp=1" in stderr
+    assert "[stage456-progress] event=findings findings=1 " \
+           "static_confirmed=0 dynamic_confirmed=0" in stderr
+    assert "[stage456-progress] event=static findings=1 " \
+           "static_confirmed=1 dynamic_confirmed=0" in stderr
+    assert "[stage456-progress] DONE findings=1 static_confirmed=1 " \
+           "dynamic_confirmed=0" in stderr
+
+
+def test_s4_reports_start_completion_and_summary(monkeypatch, tmp_path, capsys):
+    finding = _finding()
+    chunk = Chunk(id="chunk-1", size=ChunkSize.SMALL, risk_rank=1,
+                  files=["src/parser.c"], hypothesis="test")
+    cfg = SimpleNamespace(step4=SimpleNamespace(parallel=1, line_bucket=10))
+    ctx = ContextPackage(repo_root=str(tmp_path), language="c-cpp",
+                         all_files=["src/parser.c"])
+
+    monkeypatch.setattr(s4_deepdive, "_effective_runs", lambda _cfg: (1, 1))
+    monkeypatch.setattr(
+        s4_deepdive, "_deepdive_chunk",
+        lambda *_args, **_kwargs: [finding])
+
+    findings, outcomes = s4_deepdive.run([chunk], ctx, cfg)
+
+    assert findings == [finding]
+    assert outcomes == {"chunk-1": "completed"}
+    stderr = capsys.readouterr().err
+    assert "[s4-progress] START total=1 parallel=1 runs=1 vote_threshold=1" in stderr
+    assert "[s4-progress] 1/1 chunks (100%) outcome=completed" in stderr
+    assert "active=0 queued=0" in stderr
+    assert "[s4-progress] DONE chunks=1/1 findings=1 coverage_failures=0" in stderr
