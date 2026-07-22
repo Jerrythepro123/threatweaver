@@ -106,6 +106,7 @@ printed as a `[env] loaded …` line.
 | `--group-by-app` | Batch mode: clone every repo sharing an AppId under `<workspace>/<AppId>/` and run **one** scan over that directory (one report per application instead of one per repo). |
 | `--keep-clones` | Don't delete cloned repos after scanning (batch mode). |
 | `--resume` | Reuse on-disk checkpoints (SQLite state DB at `$VVAHARNESS_STATE_DIR/vvaharness.db`, default `~/.vvaharness/state/…`) instead of re-running completed stages. **Assumes the source is unchanged since the checkpointed run** — vvaharness does not detect code edits here. If the target changed, omit `--resume` (a fresh scan is clean) or run `vvaharness gc --run <path>` first to evict stale state. |
+| `--experimental-streaming-verification` | Experimental latency mode: as each s4 chunk completes voting, candidates that pass finding-local s5 policy gates begin s6 static verification while remaining chunks continue; each high-confidence static true positive immediately enters the serialized shared-build ASAN session when ASAN is enabled. The complete s4 population still passes through authoritative s5 dedup before verifier results are accepted. The legacy batch flow remains the default. Disabled with `--stop-after s4` or `s5` to avoid unexpected verifier spend. |
 | `--stop-after <step>` | Stop after `clone`/`s1`/…/`s9` (debugging). `clone` stops right after acquiring repos in batch mode and implies `--keep-clones`. |
 | `--skip-preflight` | Skip the startup credential/backend readiness probe. Does **not** bypass model/API authentication. |
 | `--step1-config <file>` | Apply an explicit Step-1 overlay YAML (exclude_dirs/exts/globs, max_file_kb, config_dedup). Lists **append** to the config's `step1`. Mutually exclusive with `--auto-step1` (this wins). |
@@ -346,7 +347,8 @@ Per target, under `<target>/security-scan/`:
 
 | File | Contents |
 |---|---|
-| `<module>_<ts>_report.md` | findings + dropped-findings appendix |
+| `<module>_<ts>_report.md` | successful findings that survived verification; canonical input for SARIF and remediation |
+| `<module>_<ts>_unconfirmed.md` | statically verified vulnerabilities that ASAN did not runtime-confirm; rendered with the same full evidence detail as confirmed findings |
 | `<module>_<ts>_report.sarif` | SARIF 2.1.0 for tooling ingestion |
 | `<module>_<ts>_errors.jsonl` | non-fatal errors |
 

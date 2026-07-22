@@ -119,6 +119,7 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     ts_safe = start_ts.replace(":", "").replace("-", "")
     module_safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in repo_name)
     out_path = out_dir / f"{module_safe}_{ts_safe}_report.md"
+    unconfirmed_path = out_dir / f"{module_safe}_{ts_safe}_unconfirmed.md"
     sarif_path = out_dir / f"{module_safe}_{ts_safe}_report.sarif"
     # Configure the per-scan error log BEFORE any stage (incl. the optional
     # auto-step1 block below) can call _errlog.log(), so its failures land in
@@ -225,7 +226,38 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     # ── Step 4 ───────────────────────────────────────────────────────────
     s4_ckpt = load_ckpt(ckpt_dir, run_id, "s4") if args.resume else None
     chunk_outcomes: dict[str, str] = {}
-    if s4_ckpt is None:
+    stream_result = None
+    experimental_streaming = bool(
+        getattr(args, "experimental_streaming_verification", False)
+        and args.stop_after not in ("s4", "s5")
+    )
+    if (getattr(args, "experimental_streaming_verification", False)
+            and not experimental_streaming):
+        print("  [streaming-verification] disabled because --stop-after s4/s5 "
+              "must not spend verifier tokens", file=sys.stderr)
+    if experimental_streaming and s4_ckpt is None:
+        from vvaharness.orchestrator import streaming_verification
+        with stage(
+                "Steps 4-6a - EXPERIMENTAL streaming deep-dive, pre-filter, "
+                "static/ASAN verify",
+                n=4, total=9), TOKENS.phase("streaming-verification"):
+            stream_result = streaming_verification.run(
+                manifest.sorted_chunks(), ctx, cfg)
+        findings = stream_result.findings
+        chunk_outcomes = stream_result.chunk_outcomes
+        save_ckpt(ckpt_dir, run_id, "s4", {
+            "findings": findings, "outcomes": chunk_outcomes,
+        })
+        save_ckpt(ckpt_dir, run_id, "s6-static", {
+            "pre_dropped": stream_result.pre_dropped,
+            "verified": stream_result.static_verified,
+            "dropped": stream_result.static_dropped,
+        })
+        save_ckpt(ckpt_dir, run_id, "s6-asan", {
+            "verified": stream_result.verified,
+            "dropped": stream_result.asan_dropped,
+        })
+    elif s4_ckpt is None:
         with stage(f"Step 4 — Deep-dive ({_m('deepdive')}; {cfg.step4.runs} runs, "
                    f"vote≥{cfg.step4.vote_threshold}, "
                    f"parallel={getattr(cfg.step4, 'parallel', 1)})",
@@ -248,8 +280,13 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
     # ── Steps 5+6+7 — Pre-filter + split verification + dedup ────────────
     s7_ckpt = load_ckpt(ckpt_dir, run_id, "s7") if args.resume else None
     if s7_ckpt is None:
-        static_ckpt = (load_ckpt(ckpt_dir, run_id, "s6-static")
-                       if args.resume else None)
+        static_ckpt = ({
+            "pre_dropped": stream_result.pre_dropped,
+            "verified": stream_result.static_verified,
+            "dropped": stream_result.static_dropped,
+        } if stream_result is not None else
+            (load_ckpt(ckpt_dir, run_id, "s6-static")
+             if args.resume else None))
         if static_ckpt is None:
             with stage("Step 5 — Pre-filter (deterministic + semantic pre-dedup)",
                        n=5, total=9), TOKENS.phase("s5-prefilter"):
@@ -272,8 +309,12 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
         if args.stop_after == "s5":
             return None, 0
 
-        asan_ckpt = (load_ckpt(ckpt_dir, run_id, "s6-asan")
-                     if args.resume else None)
+        asan_ckpt = ({
+            "verified": stream_result.verified,
+            "dropped": stream_result.asan_dropped,
+        } if stream_result is not None else
+            (load_ckpt(ckpt_dir, run_id, "s6-asan")
+             if args.resume else None))
         if asan_ckpt is None:
             with stage(f"Step 6b — ASAN verify ({_m('asan_verify')})",
                        n=6, total=9), TOKENS.phase("s6-asan"):
@@ -337,12 +378,16 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
 
     # ── Output (always re-render — cheap, and s9 needs it on disk) ───────
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    md_text = redact(report.to_markdown())
-    out_path.write_text(md_text, encoding="utf-8")
+    md_text = redact(report.to_markdown(include_dropped=False))
     n_redacted = sum(getattr(redact, "last_counts", {}).values())
+    out_path.write_text(md_text, encoding="utf-8")
+    unconfirmed_text = redact(report.to_unconfirmed_markdown())
+    n_redacted += sum(getattr(redact, "last_counts", {}).values())
+    unconfirmed_path.write_text(unconfirmed_text, encoding="utf-8")
     print(f"  [out] wrote {out_path}"
           + (f"  ({n_redacted} sensitive values masked)" if n_redacted else ""),
           file=sys.stderr)
+    print(f"  [out] wrote {unconfirmed_path}", file=sys.stderr)
     if args.stop_after == "s8":
         return out_path, len(report.findings)
 

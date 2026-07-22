@@ -35,9 +35,11 @@ node. The s5 prefilter + s6 verifier are the FP defence when voting is off.
 from __future__ import annotations
 import re
 import sys
+import time
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Callable
 
 from vvaharness.models import Chunk, ChunkSize, ContextPackage, Finding, VulnClass
 from vvaharness.backends.llm import prompt, resolve
@@ -232,7 +234,8 @@ def _native_only_chunks(chunks: list[Chunk]) -> list[Chunk]:
     return scoped
 
 
-def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg
+def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg,
+        on_findings: Callable[[list[Finding]], None] | None = None
         ) -> tuple[list[Finding], dict[str, str]]:
     """Process every chunk.
 
@@ -256,6 +259,31 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg
     guardrail_gate = max(3, parallel)
     successes = 0
     outcomes: dict[str, str] = {}   # chunk id -> "completed"|"error"|"guardrail"
+    audit_started = time.monotonic()
+    completed_chunks = 0
+
+    def _duration(seconds: float) -> str:
+        seconds = max(0, int(seconds))
+        minutes, secs = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours}h{minutes:02d}m"
+        if minutes:
+            return f"{minutes}m{secs:02d}s"
+        return f"{secs}s"
+
+    def _progress(chunk: Chunk, outcome: str) -> None:
+        nonlocal completed_chunks
+        completed_chunks += 1
+        elapsed = time.monotonic() - audit_started
+        remaining = len(chunks) - completed_chunks
+        eta = ((elapsed / completed_chunks) * remaining
+               if completed_chunks else 0.0)
+        pct = (completed_chunks / len(chunks) * 100) if chunks else 100.0
+        print(f"  [s4-progress] {completed_chunks}/{len(chunks)} chunks "
+              f"({pct:.0f}%) outcome={outcome} last={chunk.id} "
+              f"elapsed={_duration(elapsed)} eta={_duration(eta)}",
+              file=sys.stderr, flush=True)
 
     def _guardrail_fail_fast(e: GuardrailBlocked) -> None:
         raise RuntimeError(
@@ -269,7 +297,8 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg
             _label(chunk)
             try:
                 findings = _deepdive_chunk(chunk, ctx, repo_root, cfg,
-                                           runs_n, threshold)
+                                           runs_n, threshold,
+                                           on_findings=on_findings)
             except GuardrailBlocked as e:
                 guardrail_hits += 1
                 print(f"  [s4] chunk {chunk.id} GUARDRAIL-BLOCKED "
@@ -277,6 +306,7 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg
                 _errlog.log("s4", f"guardrail:{chunk.id}", e, scope="chunk",
                             files=len(chunk.files))
                 outcomes[chunk.id] = "guardrail"
+                _progress(chunk, "guardrail")
                 if guardrail_hits >= guardrail_gate and successes == 0:
                     _guardrail_fail_fast(e)
                 continue
@@ -290,12 +320,14 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg
                 _errlog.log("s4", chunk.id, e, scope="chunk",
                             files=len(chunk.files))
                 outcomes[chunk.id] = "error"
+                _progress(chunk, "error")
                 continue
             successes += 1
             outcomes[chunk.id] = "completed"
-            all_findings.extend(findings)
             print(f"  [s4] chunk {chunk.id}: {len(findings)} high-confidence findings",
                   file=sys.stderr)
+            _progress(chunk, "completed")
+            all_findings.extend(findings)
         return _collapse_across_chunks(all_findings, cfg.step4.line_bucket), outcomes
 
     print(f"  [s4] processing {len(chunks)} chunks ({parallel} parallel)...",
@@ -306,7 +338,7 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg
     for chunk in chunks:
         _label(chunk)
         futs[ex.submit(_deepdive_chunk, chunk, ctx, repo_root, cfg,
-                       runs_n, threshold)] = chunk
+                       runs_n, threshold, on_findings=on_findings)] = chunk
     try:
         for fut in as_completed(futs):
             chunk = futs[fut]
@@ -320,6 +352,7 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg
                             files=len(chunk.files))
                 results[chunk.id] = []
                 outcomes[chunk.id] = "guardrail"
+                _progress(chunk, "guardrail")
                 if guardrail_hits >= guardrail_gate and successes == 0:
                     cli.abort()
                     ex.shutdown(wait=False, cancel_futures=True)
@@ -331,12 +364,14 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg
                             files=len(chunk.files))
                 results[chunk.id] = []
                 outcomes[chunk.id] = "error"
+                _progress(chunk, "error")
                 continue
             successes += 1
             results[chunk.id] = findings
             outcomes[chunk.id] = "completed"
             print(f"  [s4] chunk {chunk.id}: {len(findings)} high-confidence findings",
                   file=sys.stderr)
+            _progress(chunk, "completed")
     except KeyboardInterrupt:
         n = cli.abort()
         print(f"  [s4] interrupted — killed {n} running subprocess(es), "
@@ -355,7 +390,9 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg
 
 
 def _deepdive_chunk(chunk: Chunk, ctx: ContextPackage, repo_root: Path, cfg,
-                    runs_n: int, threshold: int) -> list[Finding]:
+                    runs_n: int, threshold: int, *,
+                    on_findings: Callable[[list[Finding]], None] | None = None
+                    ) -> list[Finding]:
     code = _load_chunk_code(chunk, repo_root)
     code += _neighbor_context(chunk, ctx, repo_root, cfg)
     if chunk.specialist:
@@ -366,8 +403,8 @@ def _deepdive_chunk(chunk: Chunk, ctx: ContextPackage, repo_root: Path, cfg,
     line_bucket = cfg.step4.line_bucket
 
     # ── N independent runs ───────────────────────────────────────────────
-    runs: list[set[tuple]] = []
     by_key: dict[tuple, Finding] = {}
+    vote_counts: Counter = Counter()
     runs_ok = 0
 
     for run_i in range(runs_n):
@@ -382,7 +419,6 @@ def _deepdive_chunk(chunk: Chunk, ctx: ContextPackage, repo_root: Path, cfg,
                   file=sys.stderr)
             _errlog.log("s4", chunk.id, e, scope="run",
                         run=run_i + 1, runs_total=runs_n)
-            runs.append(set())
             continue
 
         runs_ok += 1
@@ -393,7 +429,7 @@ def _deepdive_chunk(chunk: Chunk, ctx: ContextPackage, repo_root: Path, cfg,
             prev = by_key.get(k)
             if prev is None or f.confidence > prev.confidence:
                 by_key[k] = f
-        runs.append(keys)
+        vote_counts.update(keys)
         print(f"    [s4] {chunk.id} run {run_i+1}/{runs_n}: "
               f"{len(findings)} raw findings", file=sys.stderr)
 
@@ -407,13 +443,18 @@ def _deepdive_chunk(chunk: Chunk, ctx: ContextPackage, repo_root: Path, cfg,
             f"all {runs_n} run(s) failed for chunk {chunk.id}")
 
     # ── Vote ─────────────────────────────────────────────────────────────
-    votes = Counter(k for run_keys in runs for k in run_keys)
     survivors: list[Finding] = []
-    for k, n in votes.items():
+    for k, n in vote_counts.items():
         if n >= threshold:
             f = by_key[k]
             f.votes = n
             survivors.append(f)
+
+    # Publish only the final representative chosen after every run and vote.
+    # The callback must be fast/nonblocking (the streaming coordinator queues
+    # this batch) so a slow verifier can never occupy an s4 audit worker.
+    if survivors and on_findings is not None:
+        on_findings(survivors)
 
     return survivors
 

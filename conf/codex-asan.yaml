@@ -177,7 +177,7 @@ step6_verify:
     adaptive_timeout: true
     per_bug_timeout: 900
     min_per_bug_timeout: 300
-    max_per_bug_timeout: 1800
+    max_per_bug_timeout: 600
     estimate_timeout: 90
     estimate_max_turns: 4
     estimate_max_budget_usd: 0.5
@@ -203,6 +203,7 @@ step6_verify:
       - format-string
       - integer-overflow
       - type-confusion
+      - other
     max_build_commands: 6
     build_commands:
       - "timeout 600 cmake -S . -B security-scan/asan/repo_build/cmake-asan -G Ninja -DCMAKE_MODULE_PATH=/mnt/d/threatweaver/inputs/cmake-modules -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS_RELWITHDEBINFO=\"-O1 -g -fno-omit-frame-pointer -fsanitize=address\" -DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO=\"-fsanitize=address\""

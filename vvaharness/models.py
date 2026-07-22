@@ -695,6 +695,11 @@ class DroppedFinding(BaseModel):
                     "UNCONFIRMED", "EXCLUDED", "GUARDRAIL_BLOCKED"]
     detail: str = ""                 # verdict_reason / error text / dedup reasoning
     canonical_idx: int | None = None # for DUPLICATE: index into FinalReport.findings
+    verification_stage: Literal["static", "asan"] | None = None
+    # ASAN-unconfirmed findings remain statically verified vulnerabilities and
+    # need the complete evidence bundle for the dedicated report.  Older
+    # checkpoints remain valid because both new fields are optional.
+    finding: Finding | None = None
 
 
 class ScopeEntry(BaseModel):
@@ -766,7 +771,7 @@ class FinalReport(BaseModel):
     degraded: bool = False
     degraded_reason: str = ""
 
-    def to_markdown(self) -> str:
+    def to_markdown(self, *, include_dropped: bool = True) -> str:
         tp = len(self.findings)
         fp = sum(1 for d in self.dropped if d.reason == "FALSE_POSITIVE")
         dup = sum(1 for d in self.dropped if d.reason == "DUPLICATE")
@@ -932,7 +937,88 @@ class FinalReport(BaseModel):
                 "independent and do not combine into a multi-step path.",
                 "",
             ])
-        out.extend(["", "## Dropped Findings", ""])
+        if include_dropped:
+            out.extend(self._render_dropped_findings())
+        if self.metrics:
+            out.extend(self._render_scope_appendix())
+        return "\n".join(out)
+
+    def to_unconfirmed_markdown(self) -> str:
+        """Render statically verified findings not runtime-confirmed by ASAN.
+
+        This intentionally uses a filename outside the ``*_report.md`` glob;
+        remediation must continue discovering only the successful-findings
+        report consumed by SARIF.
+        """
+        safe_title = re.sub(
+            r"[<>`|\[\]]", "", str(self.repo_name or self.repo_root or ""))
+        asan_unconfirmed = [
+            dropped for dropped in self.dropped
+            if (dropped.reason == "UNCONFIRMED"
+                and dropped.verification_stage == "asan"
+                and dropped.finding is not None)
+        ]
+        out = [
+            f"# Agentic SAST — {safe_title} — ASAN-Unconfirmed Vulnerabilities",
+            "",
+            "## Summary",
+            "",
+            "These findings passed adversarial static verification and must be "
+            "treated as real vulnerabilities. ASAN did not produce runtime "
+            "confirmation within the configured build/reproduction budget; that "
+            "absence is not a false-positive verdict.",
+            "",
+            f"- ASAN-unconfirmed vulnerabilities: {len(asan_unconfirmed)}",
+            "- Required disposition: remediate or manually reproduce",
+            "",
+        ]
+
+        if not asan_unconfirmed:
+            out.extend(["## Findings (0)", "", "_None._", ""])
+            return "\n".join(out)
+
+        def _severity(finding: Finding) -> Severity:
+            score = (finding.vsvs_score
+                     if finding.vsvs_score is not None else finding.cvss_score)
+            if score is None:
+                return Severity.INFO
+            if score >= 9.0:
+                return Severity.CRITICAL
+            if score >= 7.0:
+                return Severity.HIGH
+            if score >= 4.0:
+                return Severity.MEDIUM
+            return Severity.LOW
+
+        ranked = [
+            RankedFinding(
+                finding=dropped.finding,
+                severity=_severity(dropped.finding),
+                exploitability_notes=(
+                    "Adversarial static verification confirmed this vulnerability. "
+                    "ASAN runtime confirmation was not obtained; remediation is "
+                    f"still required. {dropped.detail}"),
+            )
+            for dropped in asan_unconfirmed
+        ]
+        # Reuse the canonical finding renderer so confirmed and ASAN-unconfirmed
+        # reports expose exactly the same evidence fields and sections.
+        detail_report = self.model_copy(update={
+            "findings": ranked,
+            "chains": [],
+            "dropped": [],
+            "metrics": None,
+            "threat_model": None,
+            "app_profile": None,
+            "degraded": True,
+        }).to_markdown(include_dropped=False)
+        marker = f"## Findings ({len(ranked)})"
+        out.append(detail_report[detail_report.index(marker):])
+        return "\n".join(out)
+
+    def _render_dropped_findings(
+            self, *, heading: str = "Dropped Findings") -> list[str]:
+        out = ["", f"## {heading}", ""]
         if self.dropped:
             _tag = {
                 "FALSE_POSITIVE":    "FP",
@@ -954,9 +1040,7 @@ class FinalReport(BaseModel):
         else:
             out.append("_None._")
         out.append("")
-        if self.metrics:
-            out.extend(self._render_scope_appendix())
-        return "\n".join(out)
+        return out
 
     def _render_threat_model(self) -> list[str]:
         tm = self.threat_model

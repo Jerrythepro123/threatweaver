@@ -100,6 +100,11 @@ def main(argv: list[str] | None = None) -> int:
                          "one per repo)")
     ap.add_argument("--resume", action="store_true",
                     help="reuse existing checkpoints for completed steps")
+    ap.add_argument(
+        "--experimental-streaming-verification", action="store_true",
+        help="EXPERIMENTAL: stream each s4 chunk's policy-filtered findings "
+             "into s6 static and ASAN verification while s4/s5 continue; the legacy "
+             "batch flow remains the default")
     ap.add_argument("--stop-after",
                     choices=SCAN_STOP_CHOICES,
                     help="stop after the named step (for debugging); "

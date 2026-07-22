@@ -21,6 +21,9 @@ limitations under the License.
 Per target, under `<target>/security-scan/`:
 
 - `<module>_<ts>_report.md`
+- `<module>_<ts>_unconfirmed.md` — only statically verified vulnerabilities
+  that ASAN did not runtime-confirm. These remain actionable vulnerabilities
+  and include the same detailed evidence sections as confirmed findings.
 - `<module>_<ts>_report.sarif`
 - `<module>_<ts>_errors.jsonl` (only written if a recoverable error was logged; absent on a clean run)
 

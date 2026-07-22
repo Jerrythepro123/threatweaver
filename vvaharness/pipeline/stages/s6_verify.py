@@ -267,6 +267,7 @@ def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[
                     f,
                     "UNCONFIRMED",
                     "ASAN verification required but per-run ASAN attempt budget was exhausted",
+                    stage="asan",
                 ))
             else:
                 out.append(f)
@@ -289,7 +290,7 @@ def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[
                 "asan_artifacts": artifacts,
             })
             if require_crash:
-                dropped.append(_drop(f2, "UNCONFIRMED", _asan_drop_detail("ASAN repo build failed; dynamic repro was skipped", shared_build.summary)))
+                dropped.append(_drop(f2, "UNCONFIRMED", _asan_drop_detail("ASAN repo build failed; dynamic repro was skipped", shared_build.summary), stage="asan"))
             else:
                 out.append(f2)
             print(f"    [s6-asan] bug{bug_idx} no_crash (repo build failed)",
@@ -307,7 +308,7 @@ def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[
             "asan_artifacts": artifacts,
         })
         if require_crash and not asan.crashed:
-            dropped.append(_drop(f2, "UNCONFIRMED", _asan_drop_detail("ASAN did not confirm a crash/repro within the per-bug budget", asan.summary)))
+            dropped.append(_drop(f2, "UNCONFIRMED", _asan_drop_detail("ASAN did not confirm a crash/repro within the per-bug budget", asan.summary), stage="asan"))
         else:
             out.append(f2)
         print(f"    [s6-asan] bug{bug_idx} {status}", file=sys.stderr)
@@ -470,7 +471,8 @@ def _parse_verdict(raw: str) -> tuple[str, int, str, str | None, str]:
     return verdict, conf, reason, cvss, reasoning
 
 
-def _drop(f: Finding, reason: str, detail: str) -> DroppedFinding:
+def _drop(f: Finding, reason: str, detail: str, *,
+          stage: str = "static") -> DroppedFinding:
     return DroppedFinding(
         file=f.file,
         line=f.line_start,
@@ -479,4 +481,6 @@ def _drop(f: Finding, reason: str, detail: str) -> DroppedFinding:
         chunk_id=f.chunk_id,
         reason=reason,
         detail=detail,
+        verification_stage=stage,
+        finding=(f if stage == "asan" and reason == "UNCONFIRMED" else None),
     )

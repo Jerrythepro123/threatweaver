@@ -135,8 +135,17 @@ def _gate(cfg, key: str, default):
     return default
 
 
-def run(findings: list[Finding], ctx: ContextPackage, cfg
-        ) -> tuple[list[Finding], list[DroppedFinding]]:
+def policy_filter(findings: list[Finding], ctx: ContextPackage, cfg, *,
+                  announce: bool = True
+                  ) -> tuple[list[Finding], list[DroppedFinding]]:
+    """Apply only finding-local policy gates.
+
+    The experimental streaming s4/s5/s6 coordinator uses this as soon as one
+    s4 chunk completes.  Cross-finding exact and semantic dedup remain in
+    :func:`run`, which is authoritative once the complete s4 population is
+    known.  Keeping this split prevents streaming from changing the legacy
+    stage-5 result merely because chunks finish in a different order.
+    """
     min_conf = _gate(cfg, "min_pre_confidence", 0.0) or 0.0
     require_evidence = _gate(cfg, "require_evidence", False)
     allowed_classes = _allowed_classes(cfg)
@@ -174,12 +183,19 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
             if secret_class:
                 kept_in_test.append(f)
 
-    if kept_in_test:
+    if kept_in_test and announce:
         shown = ", ".join(f"{f.file}:{f.line_start}" for f in kept_in_test[:5])
         more = (f" (+{len(kept_in_test) - 5} more)"
                 if len(kept_in_test) > 5 else "")
         print(f"  [s5-prefilter] kept {len(kept_in_test)} secret-class "
               f"finding(s) in test paths: {shown}{more}", file=sys.stderr)
+
+    return keep, dropped
+
+
+def run(findings: list[Finding], ctx: ContextPackage, cfg
+        ) -> tuple[list[Finding], list[DroppedFinding]]:
+    keep, dropped = policy_filter(findings, ctx, cfg)
 
     s7d = getattr(cfg, "step7_dedup", None)
     line_tol = getattr(s7d, "line_tolerance", 10)

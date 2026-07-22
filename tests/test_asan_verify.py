@@ -27,6 +27,38 @@ _ASAN_BUILD_LOG = (
 )
 
 
+_REAL_ASAN_LOG = (
+    "$ timeout 12 ./build/parser trigger.bin\n"
+    "[rc=-6]\n"
+    "==42==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1234\n"
+    "    #0 0x1234 in parse src/parser.cpp:10\n"
+    "SUMMARY: AddressSanitizer: heap-buffer-overflow src/parser.cpp:10 in parse\n"
+)
+
+
+def test_runtime_confirmation_requires_captured_asan_failure():
+    assert asan_verify._actual_asan_trigger(_REAL_ASAN_LOG)
+    assert asan_verify._first_crashing_command([_REAL_ASAN_LOG]) == (
+        "timeout 12 ./build/parser trigger.bin")
+
+
+def test_runtime_confirmation_rejects_model_or_generic_asan_text():
+    assert not asan_verify._actual_asan_trigger(
+        "ERROR: AddressSanitizer: heap-buffer-overflow\n"
+        "SUMMARY: AddressSanitizer: heap-buffer-overflow")
+    assert not asan_verify._actual_asan_trigger(
+        "$ ./build/parser\n[rc=1]\nAddressSanitizer was enabled")
+
+
+def test_runtime_confirmation_rejects_zero_exit_or_incomplete_report():
+    assert not asan_verify._actual_asan_trigger(
+        _REAL_ASAN_LOG.replace("[rc=-6]", "[rc=0]"))
+    assert not asan_verify._actual_asan_trigger(
+        _REAL_ASAN_LOG.replace(
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow "
+            "src/parser.cpp:10 in parse\n", ""))
+
+
 def test_build_requires_declared_runnable_artifact(tmp_path):
     assert not asan_verify._asan_build_succeeded(
         [_ASAN_BUILD_LOG], {}, tmp_path)

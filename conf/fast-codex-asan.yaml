@@ -132,7 +132,7 @@ step4:
   neighbor_context_max: 6
 
 step5_prefilter:
-  min_pre_confidence: 0.9
+  min_pre_confidence: 0.8
   require_evidence: true
   allowed_classes:
     - use-after-free
@@ -142,6 +142,7 @@ step5_prefilter:
     - integer-overflow
     - type-confusion
     - logic-flaw
+    - other
 
 step6_verify:
   parallel: 2
@@ -168,7 +169,7 @@ step6_verify:
     adaptive_timeout: true
     per_bug_timeout: 300
     min_per_bug_timeout: 300
-    max_per_bug_timeout: 900
+    max_per_bug_timeout: 300
     estimate_timeout: 90
     estimate_max_turns: 4
     estimate_max_budget_usd: 0.5
@@ -194,6 +195,7 @@ step6_verify:
       - format-string
       - integer-overflow
       - type-confusion
+      - other
     max_build_commands: 6
     allowed_build_prefixes:
       - "timeout 600 make"

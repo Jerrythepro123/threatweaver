@@ -412,6 +412,61 @@ def test_to_markdown_demotes_injected_verifier_heading():
     assert "#### Adversarial verification" in md
 
 
+def test_unconfirmed_report_contains_only_full_asan_unconfirmed_findings():
+    asan_finding = _minimal_finding(
+        verdict="TRUE_POSITIVE",
+        verdict_confidence=9,
+        verdict_reason="statically confirmed",
+        verifier_reasoning="The attacker-controlled length reaches memcpy.",
+        cvss_score=8.8,
+        cvss_rating="High",
+        asan_status="no_crash",
+        asan_evidence="Reproduction completed without an ASAN crash.",
+        recommendation="Validate len against the destination capacity.",
+        impact="Memory corruption may permit code execution.",
+        exploit_scenario="A crafted file supplies an oversized length.",
+    )
+    asan_drop = DroppedFinding(
+        file=asan_finding.file,
+        line=asan_finding.line_start,
+        vuln_class=asan_finding.vuln_class,
+        title=asan_finding.title,
+        chunk_id=asan_finding.chunk_id,
+        reason="UNCONFIRMED",
+        detail="ASAN did not confirm a crash within budget.",
+        verification_stage="asan",
+        finding=asan_finding,
+    )
+    excluded = DroppedFinding(
+        file="src/excluded.c", line=7, vuln_class=VulnClass.OTHER,
+        title="excluded candidate", chunk_id="chunk-02", reason="EXCLUDED",
+        detail="class disabled by policy",
+    )
+    static_unconfirmed = DroppedFinding(
+        file="src/static.c", line=8, vuln_class=VulnClass.OTHER,
+        title="low-confidence static candidate", chunk_id="chunk-03",
+        reason="UNCONFIRMED", verification_stage="static",
+        finding=_minimal_finding(file="src/static.c", line_start=8),
+    )
+    report = FinalReport(
+        repo_root="/repo", findings=[], chains=[], summary="summary",
+        dropped=[excluded, static_unconfirmed, asan_drop],
+    )
+
+    md = report.to_unconfirmed_markdown()
+
+    assert "ASAN-unconfirmed vulnerabilities: 1" in md
+    assert "heap overflow in parse" in md
+    assert "#### Description" in md
+    assert "#### Impact" in md
+    assert "#### Exploit scenario" in md
+    assert "#### How to fix" in md
+    assert "#### Adversarial verification" in md
+    assert "#### ASAN runtime evidence" in md
+    assert "excluded candidate" not in md
+    assert "low-confidence static candidate" not in md
+
+
 def test_to_markdown_neutralizes_injected_precondition_bullet():
     # A model-supplied list field carrying a newline + ATX heading must not
     # break out of its bullet into a structural heading in the rendered report.

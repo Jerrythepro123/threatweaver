@@ -38,13 +38,20 @@ from vvaharness.report.redact import redact
 from vvaharness.util.json_extract import extract_json
 
 
-_ASAN_RE = re.compile(
-    r"AddressSanitizer|LeakSanitizer|UndefinedBehaviorSanitizer|"
-    r"heap-buffer-overflow|stack-buffer-overflow|global-buffer-overflow|"
-    r"heap-use-after-free|stack-use-after-return|use-after-poison|"
-    r"double-free|attempting free on address|SEGV on unknown address",
-    re.IGNORECASE,
+# Runtime confirmation is deliberately stricter than build-instrumentation
+# detection below.  A model mentioning "AddressSanitizer" is not evidence that
+# an executed reproduction triggered it.  Require the canonical ASAN error and
+# summary records in a harness-captured command log, plus a non-zero process
+# result (the configured ASAN_OPTIONS uses abort_on_error=1).
+_ASAN_ERROR_RE = re.compile(
+    r"^(?:==\d+==)?(?:ERROR: AddressSanitizer:|AddressSanitizer:DEADLYSIGNAL)",
+    re.IGNORECASE | re.MULTILINE,
 )
+_ASAN_SUMMARY_RE = re.compile(
+    r"^SUMMARY: AddressSanitizer:",
+    re.IGNORECASE | re.MULTILINE,
+)
+_RUN_RC_RE = re.compile(r"^\[rc=(-?\d+)\]$", re.MULTILINE)
 _ASAN_BUILD_RE = re.compile(
     r"-fsanitize=(?:address|undefined)|\bfsanitize=address\b|"
     r"\blibasan\b|AddressSanitizer|UndefinedBehaviorSanitizer|"
@@ -446,11 +453,11 @@ def run(finding: Finding, ctx: ContextPackage, cfg, *, idx: int, build: AsanBuil
                 out_dir=attempt_dir,
                 deadline=deadline,
             )
-            evidence = _plan_text(plan, "asan_evidence", "crash_evidence", "run_evidence")
-            crashed = bool(_ASAN_RE.search("\n".join(runs + ([evidence] if evidence else []))))
+            # Only captured command output can confirm ASAN.  Model-authored
+            # evidence is retained in the summary for auditability, but it is
+            # never part of the verdict calculation.
+            crashed = any(_actual_asan_trigger(log) for log in runs)
             repro_command = _first_crashing_command(runs) if crashed else ""
-            if crashed and not repro_command:
-                repro_command = _first_plan_command(plan)
             summary = _summarize(crashed, sample_count, script_count, runs, attempt_dir, attempt=repro_attempt, plan=plan, repro_command=repro_command)
         except Exception as exc:
             crashed = False
@@ -828,7 +835,7 @@ def _summarize(crashed: bool, sample_count: int, script_count: int,
 
 def _first_crashing_command(logs: list[str]) -> str:
     for log in logs:
-        if not _ASAN_RE.search(log):
+        if not _actual_asan_trigger(log):
             continue
         for line in log.splitlines():
             if line.startswith("$ "):
@@ -836,14 +843,23 @@ def _first_crashing_command(logs: list[str]) -> str:
     return ""
 
 
-def _first_plan_command(plan: dict) -> str:
-    commands = plan.get("run_commands") or plan.get("commands_tried") or []
-    if isinstance(commands, list):
-        for cmd in commands:
-            text = str(cmd).strip()
-            if text:
-                return text
-    return ""
+def _actual_asan_trigger(log: str) -> bool:
+    """Return true only for an ASAN failure captured from an executed command.
+
+    The harness prefixes real executions with ``$ ...`` and ``[rc=N]``.  With
+    ``abort_on_error=1``, a genuine report must have a non-zero result and both
+    ASAN's canonical ERROR and SUMMARY records.  This intentionally treats
+    truncated, model-reported, generic, UBSAN-only, or zero-exit output as
+    unconfirmed instead of promoting a possible false positive.
+    """
+    if not log or not log.startswith("$ ") or log.startswith("SKIPPED "):
+        return False
+    rc_match = _RUN_RC_RE.search(log)
+    if rc_match is None or int(rc_match.group(1)) == 0:
+        return False
+    return bool(_ASAN_ERROR_RE.search(log) and _ASAN_SUMMARY_RE.search(log))
+
+
 def _build_summary(ok: bool, build: list[str], out_dir: Path, attempt: int, *, plan: dict) -> str:
     status = "ASAN_BUILD_OK" if ok else "ASAN_BUILD_FAIL"
     evidence = _plan_text(plan, "build_evidence", "rationale")
