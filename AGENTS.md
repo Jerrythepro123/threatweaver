@@ -64,8 +64,8 @@ what it says, then re-run `setup` until it prints **Ready ✓**.
 
 To run the product's complete source test suite, use `vvaharness test` from this
 checkout (or `vvaharness test --root /path/to/threatweaver`). It runs every
-`tests/test_*.py` module, including s1–s9, ASAN, adaptive verification planning,
-and persistent experience tests.
+`tests/test_*.py` module, including s1–s9, ASAN, and adaptive verification
+planning tests.
 
 ## Choosing a profile (don't guess — `setup` recommends one)
 | You have… | Use | How |
@@ -97,11 +97,6 @@ vvaharness scan --repo /path/to/target --application-id <id> [--config <profile>
 - Output: `<target>/security-scan/*_report.md`, `*.sarif`, `*_errors.jsonl`.
 - A scan does not write `<target>/security-remediation/` or edit source files.
 - A `run_manifest.json` (written in the current working directory, not under `security-scan/`) records models/config/timing for the run.
-- After s9 completes, ASAN-confirmed bugs are copied into the persistent,
-  human-editable archive at `~/.vvaharness/experience/asan/` (override with
-  `VVAHARNESS_EXPERIENCE_DIR`). No experience is saved before the entire scan
-  completes. Use `vvaharness experience list/show/remove/restore/validate` to
-  curate it; removed entries stay rejected across future scans.
 - Findings are **triage candidates, not confirmed vulnerabilities** — say so
   when you summarize them.
 

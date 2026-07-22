@@ -40,6 +40,7 @@ from vvaharness.models import (
     Chunk,
     ContextPackage,
     EntryPoint,
+    ModuleInfo,
     Sink,
     TaskManifest,
     Threat,
@@ -239,3 +240,94 @@ def test_tokenization_rule_matches_source_intent():
     # substring-only does NOT create token overlap
     assert not (tok("handle_login") & tok("log"))
     assert not (tok("auth") & tok("authenticate"))
+
+
+def test_native_scope_filters_before_chunk_generation_without_mutating_input():
+    native_entry = "src/server.cpp::serve"
+    native_sink = "src/parser.cc::parse"
+    python_entry = "tools/generate.py::main"
+    ctx = ContextPackage(
+        repo_root="/repo",
+        language="python",
+        all_files=[
+            "src/server.cpp",
+            "src/parser.cc",
+            "include/server.hpp",
+            "tools/generate.py",
+            "web/client.ts",
+        ],
+        modules=[
+            ModuleInfo(
+                name="server",
+                files=["src/server.cpp", "tools/generate.py"],
+            ),
+            ModuleInfo(name="generator", files=["tools/generate.py"]),
+        ],
+        entry_points=[
+            EntryPoint(
+                file="src/server.cpp",
+                function="serve",
+                kind="network",
+                reachable_from_unauth=True,
+            ),
+            EntryPoint(
+                file="tools/generate.py", function="main", kind="cli"
+            ),
+        ],
+        unsafe_sinks=[
+            Sink(file="src/parser.cc", line=42, function="memcpy"),
+            Sink(file="tools/generate.py", line=7, function="eval"),
+        ],
+        call_graph={
+            native_entry: [native_sink, python_entry],
+            python_entry: [native_entry],
+        },
+        call_graph_files={
+            native_entry: ["src/server.cpp:10"],
+            native_sink: ["src/parser.cc:42"],
+            python_entry: ["tools/generate.py:3"],
+        },
+    )
+
+    scoped = s3_decompose._native_only_context(ctx)
+
+    assert scoped.language == "c-cpp"
+    assert scoped.all_files == [
+        "src/server.cpp",
+        "src/parser.cc",
+        "include/server.hpp",
+    ]
+    assert [module.name for module in scoped.modules] == ["server"]
+    assert scoped.modules[0].files == ["src/server.cpp"]
+    assert [entry.file for entry in scoped.entry_points] == ["src/server.cpp"]
+    assert [sink.file for sink in scoped.unsafe_sinks] == ["src/parser.cc"]
+    assert scoped.call_graph == {native_entry: [native_sink]}
+    assert set(scoped.call_graph_files) == {native_entry, native_sink}
+
+    # Reporting and later metrics retain the original full repository scope.
+    assert "tools/generate.py" in ctx.all_files
+    assert len(ctx.modules) == 2
+
+
+def test_model_chunk_paths_are_normalized_against_native_scope_only():
+    ctx = ContextPackage(
+        repo_root="/repo",
+        language="typescript",
+        all_files=["src/server.cpp", "src/server.h", "web/client.ts"],
+    )
+    scoped = s3_decompose._native_only_context(ctx)
+    manifest = TaskManifest(
+        rationale="test",
+        chunks=[
+            Chunk(
+                id="chunk-01",
+                files=["src/server.cpp", "web/client.ts"],
+                hypothesis="server request parsing",
+            )
+        ],
+    )
+
+    s3_decompose._normalize_chunk_files(manifest, scoped)
+
+    assert manifest.chunks[0].files == ["src/server.cpp"]
+    assert "web/client.ts" not in scoped.to_prompt_block()

@@ -173,7 +173,10 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
           f"app_profile={'yes' if app_profile else 'no'}", file=sys.stderr)
 
     def _m(role: str) -> str:
-        mid, via, _ = resolve_model(getattr(cfg.models, role))
+        model = getattr(cfg.models, role, None)
+        if model is None and role == "asan_verify":
+            model = cfg.models.verify
+        mid, via, _ = resolve_model(model)
         return f"{mid} [{via}]"
 
     # ── Step 1 — Pre-process (runs first; s2 consumes its output) ───────
@@ -242,17 +245,48 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
 
     raw_count = len(findings)
 
-    # ── Steps 5+6+7 — Pre-filter + verify + dedup (checkpointed together) ──
+    # ── Steps 5+6+7 — Pre-filter + split verification + dedup ────────────
     s7_ckpt = load_ckpt(ckpt_dir, run_id, "s7") if args.resume else None
     if s7_ckpt is None:
-        with stage("Step 5 — Pre-filter (deterministic + semantic pre-dedup)",
-                   n=5, total=9), TOKENS.phase("s5-prefilter"):
-            findings, pre_dropped = s5_prefilter.run(findings, ctx, cfg)
+        static_ckpt = (load_ckpt(ckpt_dir, run_id, "s6-static")
+                       if args.resume else None)
+        if static_ckpt is None:
+            with stage("Step 5 — Pre-filter (deterministic + semantic pre-dedup)",
+                       n=5, total=9), TOKENS.phase("s5-prefilter"):
+                findings, pre_dropped = s5_prefilter.run(findings, ctx, cfg)
+            if args.stop_after == "s5":
+                return None, 0
+            with stage(f"Step 6a — Static verify ({_m('verify')})",
+                       n=6, total=9), TOKENS.phase("s6-static"):
+                static_verified, static_dropped = s6_verify.run_static(
+                    findings, ctx, cfg)
+            save_ckpt(ckpt_dir, run_id, "s6-static", {
+                "pre_dropped": pre_dropped,
+                "verified": static_verified,
+                "dropped": static_dropped,
+            })
+        else:
+            pre_dropped = static_ckpt["pre_dropped"]
+            static_verified = static_ckpt["verified"]
+            static_dropped = static_ckpt["dropped"]
         if args.stop_after == "s5":
             return None, 0
-        with stage(f"Step 6 — Verify ({_m('verify')})", n=6, total=9), \
-                TOKENS.phase("s6-verify"):
-            verified, dropped = s6_verify.run(findings, ctx, cfg)
+
+        asan_ckpt = (load_ckpt(ckpt_dir, run_id, "s6-asan")
+                     if args.resume else None)
+        if asan_ckpt is None:
+            with stage(f"Step 6b — ASAN verify ({_m('asan_verify')})",
+                       n=6, total=9), TOKENS.phase("s6-asan"):
+                verified, asan_dropped = s6_verify.run_asan(
+                    static_verified, ctx, cfg)
+            save_ckpt(ckpt_dir, run_id, "s6-asan", {
+                "verified": verified,
+                "dropped": asan_dropped,
+            })
+        else:
+            verified = asan_ckpt["verified"]
+            asan_dropped = asan_ckpt["dropped"]
+        dropped = static_dropped + asan_dropped
         if args.stop_after == "s6":
             return None, 0
         with stage(f"Step 7 — Dedup ({_m('dedup')})", n=7, total=9), \
@@ -329,21 +363,6 @@ def scan_repo(repo: Path, repo_name: str, application_id: str | None,
         print(f"  [out] wrote {sarif_path}", file=sys.stderr)
         save_ckpt(ckpt_dir, run_id, "s9", str(sarif_path))
 
-    # Experience is committed only after the complete detection scan has
-    # successfully produced both its Markdown report and s9 SARIF. Earlier
-    # stages merely attach evidence to findings; interrupted scans teach nothing.
-    try:
-        from vvaharness.experience.asan import save_completed_scan
-        saved_exp, rejected_exp = save_completed_scan(
-            report, ctx, scan_id=f"{run_id}:{start_ts}")
-        if saved_exp or rejected_exp:
-            print(f"  [experience] committed {len(saved_exp)} ASAN-confirmed "
-                  f"bug(s); {rejected_exp} human-rejected", file=sys.stderr)
-    except Exception as exc:  # noqa: BLE001
-        # Archival failure cannot invalidate the completed security report.
-        print(f"  [experience] WARN: ASAN experience commit failed: "
-              f"{redact(str(exc))}", file=sys.stderr)
-        _errlog.log("s9", "asan-experience", exc)
     if args.stop_after == "s9":
         return out_path, len(report.findings)
 

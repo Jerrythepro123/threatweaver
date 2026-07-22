@@ -4,19 +4,19 @@
 #   vvaharness scan --repo /mnt/d/<target> --stop-after s9 --config ./fast-codex-asan.yaml
 #
 # Tuned for a ~1 hour s1-s9 run on medium native-code repositories: narrow
-# chunking, low parallelism, no s10/s11, gpt-5.5 first for audit, and Codex
+# chunking, low parallelism, no s10/s11, gpt-5.6-sol first for audit, and Codex
 # only for bounded ASAN repro bundles.
 
 models:
-  autoexclude:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  preprocess:   {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  threatmodel:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  decompose:    {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  deepdive:     {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  verify:       {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  dedup:        {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  chain:        {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  asan_verify:  {id: "${VVAHARNESS_CODEX_MODEL:-}", via: codex}
+  autoexclude:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  preprocess:   {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  threatmodel:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  decompose:    {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  deepdive:     {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  verify:       {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  dedup:        {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  chain:        {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  asan_verify:  {id: "${VVAHARNESS_CODEX_MODEL:-gpt-5.6-sol}", via: codex}
 
 openai:
   api_key: ${OPENAI_API_KEY}
@@ -132,8 +132,16 @@ step4:
   neighbor_context_max: 6
 
 step5_prefilter:
-  min_pre_confidence: 0.85
+  min_pre_confidence: 0.9
   require_evidence: true
+  allowed_classes:
+    - use-after-free
+    - heap-overflow
+    - stack-overflow
+    - format-string
+    - integer-overflow
+    - type-confusion
+    - logic-flaw
 
 step6_verify:
   parallel: 2
@@ -146,19 +154,21 @@ step6_verify:
     - Grep
   asan:
     enabled: true
-    # A final TRUE_POSITIVE must have ASAN proof; failed repros become UNCONFIRMED.
+    # Memory-compatible findings require ASAN proof. Other enabled classes
+    # keep their static adversarial-verifier verdict.
     require_crash: true
-    all_classes: true
+    all_classes: false
     max_findings: all
-    max_turns: 24
+    max_turns: 8
     max_budget_usd: 15.0
     repo_build_timeout: 2400
-    # Per-finding verification resources are estimated from call-chain and
-    # runtime complexity. per_bug_timeout is only the estimator fallback.
+    # Estimate verification time, turns, and spend independently for each bug
+    # from call-chain and runtime complexity. per_bug_timeout is only the
+    # estimator fallback.
     adaptive_timeout: true
     per_bug_timeout: 300
     min_per_bug_timeout: 300
-    max_per_bug_timeout: 1800
+    max_per_bug_timeout: 900
     estimate_timeout: 90
     estimate_max_turns: 4
     estimate_max_budget_usd: 0.5

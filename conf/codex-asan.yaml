@@ -4,23 +4,23 @@
 #   vvaharness scan --repo /mnt/d/<target> --stop-after s9 --config ./codex-asan.yaml
 #
 # Tuned for substantially broader s1-s9 coverage than quick triage. This can
-# exceed one hour on a repository the size of nginx. No s10/s11; gpt-5.5 does
+# exceed one hour on a repository the size of nginx. No s10/s11; gpt-5.6-sol does
 # static audit and Codex is used only for bounded ASAN repro bundles.
 
 models:
-  # Primary audit path: gpt-5.5 through the OpenAI-compatible backend.
-  autoexclude:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  preprocess:   {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  threatmodel:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  decompose:    {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  deepdive:     {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  verify:       {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  dedup:        {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  chain:        {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  # Primary audit path: gpt-5.6-sol through the OpenAI-compatible backend.
+  autoexclude:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  preprocess:   {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  threatmodel:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  decompose:    {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  deepdive:     {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  verify:       {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  dedup:        {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  chain:        {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
 
   # Codex is only used after s6, to author ASAN build/repro bundles.
   # Empty id means: use the operator's Codex CLI default profile/model.
-  asan_verify:  {id: "${VVAHARNESS_CODEX_MODEL:-}", via: codex}
+  asan_verify:  {id: "${VVAHARNESS_CODEX_MODEL:-gpt-5.6-sol}", via: codex}
 
 openai:
   api_key:    ${OPENAI_API_KEY}
@@ -137,8 +137,21 @@ step4:
   neighbor_context_max: 40
 
 step5_prefilter:
-  min_pre_confidence: 0.9
+  min_pre_confidence: 0.8
   require_evidence: true
+  allowed_classes:
+    - use-after-free
+    - heap-overflow
+    - stack-overflow
+    - format-string
+    - integer-overflow
+    - type-confusion
+    - race-condition
+    - injection
+    - unsafe-deserialization
+    - logic-flaw
+    - info-leak
+    - other
 
 step6_verify:
   parallel: 5
@@ -151,15 +164,28 @@ step6_verify:
     - Grep
   asan:
     enabled: true
-    # A final TRUE_POSITIVE must have ASAN proof; failed repros become
-    # UNCONFIRMED. Apply this requirement to every vulnerability class.
+    # Memory-compatible findings require ASAN proof. Other enabled classes
+    # keep their static adversarial-verifier verdict.
     require_crash: true
-    all_classes: true
+    all_classes: false
     max_findings: all
     max_turns: 24
     max_budget_usd: 15.0
     repo_build_timeout: 2400
+    # Estimate verification time, turns, and spend independently for each bug.
+    # per_bug_timeout is used only if adaptive estimation is disabled/fails.
+    adaptive_timeout: true
     per_bug_timeout: 900
+    min_per_bug_timeout: 300
+    max_per_bug_timeout: 1800
+    estimate_timeout: 90
+    estimate_max_turns: 4
+    estimate_max_budget_usd: 0.5
+    min_repro_turns: 8
+    max_repro_turns: 40
+    min_repro_budget_usd: 1.0
+    max_repro_budget_usd: 15.0
+    execution_reserve: 120
     plan_timeout: 600
     build_plan_timeout: 600
     repro_plan_timeout: 600

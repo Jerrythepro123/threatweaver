@@ -11,14 +11,14 @@
 # and keeps low concurrency to reduce provider throttling.
 
 models:
-  autoexclude: {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  preprocess:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  threatmodel: {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  decompose:   {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  deepdive:    {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  verify:      {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  dedup:       {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
-  chain:       {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.5}", via: openai}
+  autoexclude: {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  preprocess:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  threatmodel: {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  decompose:   {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  deepdive:    {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  verify:      {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  dedup:       {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
+  chain:       {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
 
 openai:
   api_key:    ${OPENAI_API_KEY}
@@ -118,8 +118,21 @@ step4:
   neighbor_context_max: 8
 
 step5_prefilter:
-  min_pre_confidence: 0.9
+  min_pre_confidence: 0.8
   require_evidence: true
+  allowed_classes:
+    - use-after-free
+    - heap-overflow
+    - stack-overflow
+    - format-string
+    - integer-overflow
+    - type-confusion
+    - race-condition
+    - injection
+    - unsafe-deserialization
+    - logic-flaw
+    - info-leak
+    - other
 
 step6_verify:
   parallel: 2
@@ -130,6 +143,23 @@ step6_verify:
     - Read
     - Glob
     - Grep
+  # OpenAI agentic sessions do not support the Bash tool required by the ASAN
+  # build/repro planner. Keep the adaptive envelope explicit and disabled so
+  # this OpenAI-only quick profile remains runnable and reproducible.
+  asan:
+    enabled: false
+    adaptive_timeout: true
+    per_bug_timeout: 300
+    min_per_bug_timeout: 300
+    max_per_bug_timeout: 1800
+    estimate_timeout: 90
+    estimate_max_turns: 4
+    estimate_max_budget_usd: 0.5
+    min_repro_turns: 8
+    max_repro_turns: 40
+    min_repro_budget_usd: 1.0
+    max_repro_budget_usd: 15.0
+    execution_reserve: 120
 
 step7_dedup:
   line_tolerance: 3

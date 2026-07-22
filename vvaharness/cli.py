@@ -170,12 +170,6 @@ def _remediate(rest: list[str]) -> int:
     return remediate(repo, rest, cfg)
 
 
-def _experience(rest: list[str]) -> int:
-    """Inspect and curate the persistent ASAN experience archive."""
-    from vvaharness.experience.cli import main as experience_main
-    return experience_main(rest)
-
-
 def _find_test_root(explicit: str | None = None) -> Path | None:
     """Locate a source checkout containing the complete shipped test suite."""
     candidates: list[Path] = []
@@ -194,15 +188,40 @@ def _find_test_root(explicit: str | None = None) -> Path | None:
     return None
 
 
+def _test_models_online(config_path: str | None) -> int:
+    """Probe every model/backend pair used by the selected test profile."""
+    from vvaharness import config as config_mod
+    from vvaharness.orchestrator import configure_backends, probe_backends
+
+    cfg_path = Path(config_path or _config_path_from([])).expanduser()
+    if not cfg_path.is_file():
+        print(f"vvaharness test: config not found: {cfg_path}", file=sys.stderr)
+        return 2
+    try:
+        cfg = config_mod.load(str(cfg_path))
+        configure_backends(cfg, cfg_path.resolve().parent)
+    except Exception as exc:
+        print(f"vvaharness test: could not load config {cfg_path}: {exc}",
+              file=sys.stderr)
+        return 2
+
+    print(f"  vvaharness test: checking configured models via {cfg_path}")
+    return 0 if probe_backends(cfg) else 1
+
+
 def _test(rest: list[str]) -> int:
-    """Run every test module in the source checkout and return pytest's status."""
+    """Run the source suite, then verify configured models are reachable."""
     import argparse
 
     ap = argparse.ArgumentParser(
         prog="vvaharness test",
-        description="Run the complete vvaharness pytest suite (all tests/ modules).",
+        description=("Run the complete vvaharness pytest suite and live model "
+                     "connectivity checks."),
     )
     ap.add_argument("--root", help="vvaharness source checkout (auto-detected by default)")
+    ap.add_argument("--config", help="profile to use for live model checks")
+    ap.add_argument("--skip-model-check", action="store_true",
+                    help="run the source suite without contacting configured models")
     args, pytest_args = ap.parse_known_args(rest)
     root = _find_test_root(args.root)
     if root is None:
@@ -211,15 +230,21 @@ def _test(rest: list[str]) -> int:
         return 2
     test_files = len(list((root / "tests").glob("test_*.py")))
     print(f"  vvaharness test: {test_files} test module(s) under {root / 'tests'}")
-    print("  coverage: s1–s9, ASAN, verification planning, experience, CLI, "
+    print("  coverage: s1–s9, ASAN, verification planning, CLI, "
           "orchestration, reports, remediation, validation")
     forwarded = [arg for arg in pytest_args if arg != "--"]
     command = [sys.executable, "-m", "pytest", "-ra", "tests", *forwarded]
     try:
-        return subprocess.run(command, cwd=root, check=False).returncode
+        test_rc = subprocess.run(command, cwd=root, check=False).returncode
     except OSError as exc:
         print(f"vvaharness test: could not start pytest: {exc}", file=sys.stderr)
         return 2
+    if test_rc:
+        return test_rc
+    if args.skip_model_check:
+        print("  vvaharness test: live model check skipped")
+        return 0
+    return _test_models_online(args.config)
 
 
 def _config_path_from(rest: list[str]) -> str:
@@ -431,8 +456,7 @@ Commands:
   doctor     Check credentials + live backend connectivity (read-only)
   estimate   Print a rough scope/cost preview for a repo (no API spend)
   gc         Delete old checkpoint runs (--keep-runs / --max-age-days / --dry-run)
-  experience Inspect or curate persistent ASAN-verified bug experience
-  test       Run the complete vvaharness test suite (all modules under tests/)
+  test       Run the complete test suite and live configured-model checks
   scan       Scan a repo (or --repo-file batch) for vulnerabilities (s1–s9)
   remediate  Walk findings from a prior scan and remediate them (Remediation Agent)
              (--interactive/-i to pick issues from a menu; --mode fix|report-only;
@@ -479,8 +503,6 @@ def main(argv: list[str] | None = None) -> int:
             return _estimate(args[1:])
         if cmd == "gc":
             return _gc(args[1:])
-        if cmd == "experience":
-            return _experience(args[1:])
         if cmd == "test":
             return _test(args[1:])
         if cmd == "remediate":

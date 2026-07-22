@@ -256,8 +256,8 @@ vvaharness test -x                 # forward pytest flags
 vvaharness test --root /path/to/threatweaver
 ```
 
-The command covers s1–s9, ASAN and adaptive verification planning, persistent
-experience, orchestration, CLI, reports, remediation, and validation. It must be
+The command covers s1–s9, ASAN and adaptive verification planning,
+orchestration, CLI, reports, remediation, and validation. It must be
 run from a source checkout (or with `--root`) because the tests are source files,
 not scan-time product data.
 
@@ -326,29 +326,9 @@ source files when run in fix mode. `scan` itself does neither.
 Pipeline checkpoints and resume state are kept **outside** the scanned repo, in
 a SQLite state DB at `$VVAHARNESS_STATE_DIR/vvaharness.db` (default
 `~/.vvaharness/state/`); prune old runs with `vvaharness gc`.
-
-### Persistent ASAN experience
-
-After a scan successfully completes s9, every finding confirmed by an ASAN crash
-is archived under `~/.vvaharness/experience/asan/active/<fingerprint>/`. Each
-entry contains a human-editable `experience.yaml` and a copy of its repro
-artifacts. Interrupted or pre-s9 scans do not add experience. Set
-`VVAHARNESS_EXPERIENCE_DIR` to choose another persistent location.
-
-```bash
-vvaharness experience path
-vvaharness experience list
-vvaharness experience show <id-prefix>
-vvaharness experience remove <id-prefix> --reason "wrong finding"
-vvaharness experience restore <id-prefix>
-vvaharness experience validate
-```
-
-`remove` moves the entry to `asan/rejected/`; later scans will not relearn that
-fingerprint unless a human runs `restore`. Humans may also edit the YAML directly
-(including `human_notes` and `active`) and then run `experience validate`.
-
----
+Stage 6 stores static verification and ASAN verification as separate
+checkpoints, so `--resume` can continue ASAN without repeating completed static
+verification.
 
 ## Limitations (read before you trust output)
 

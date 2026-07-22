@@ -53,6 +53,17 @@ class _S4Ckpt(TypedDict):
     outcomes: dict[str, str]
 
 
+class _S6StaticCkpt(TypedDict):
+    pre_dropped: list[DroppedFinding]
+    verified: list[Finding]
+    dropped: list[DroppedFinding]
+
+
+class _S6AsanCkpt(TypedDict):
+    verified: list[Finding]
+    dropped: list[DroppedFinding]
+
+
 _S7Ckpt = tuple[list[DroppedFinding],   # pre_dropped
                 list[Finding],          # verified
                 list[DroppedFinding],   # dropped
@@ -65,6 +76,8 @@ _STEP_SCHEMA: dict[str, TypeAdapter] = {
     "s2": TypeAdapter(ThreatModel),
     "s3": TypeAdapter(TaskManifest),
     "s4": TypeAdapter(_S4Ckpt),
+    "s6-static": TypeAdapter(_S6StaticCkpt),
+    "s6-asan": TypeAdapter(_S6AsanCkpt),
     "s7": TypeAdapter(_S7Ckpt),
     "s8": TypeAdapter(FinalReport),
     "s9": TypeAdapter(str),

@@ -30,14 +30,15 @@ def _finding(file: str, vuln_class: VulnClass) -> Finding:
     )
 
 
-def _run(*findings: Finding):
+def _run(*findings: Finding, allowed_classes=None):
     ctx = ContextPackage(
         repo_root="/repo", language="c-cpp",
         all_files=[finding.file for finding in findings],
     )
     cfg = SimpleNamespace(
         step5_prefilter=SimpleNamespace(
-            min_pre_confidence=0.0, require_evidence=False),
+            min_pre_confidence=0.0, require_evidence=False,
+            allowed_classes=allowed_classes),
         step7_dedup=SimpleNamespace(
             line_tolerance=10, pre_verify_threshold=0, semantic=False),
     )
@@ -89,4 +90,28 @@ def test_drops_non_memory_finding_in_c_cpp():
     kept, dropped = _run(finding)
 
     assert kept == []
-    assert dropped[0].detail == "not a low-level memory-safety finding"
+    assert dropped[0].detail == "vulnerability class not enabled by stage-5 policy"
+
+
+@pytest.mark.parametrize("vuln_class", [
+    VulnClass.RACE,
+    VulnClass.INJECTION,
+    VulnClass.DESERIALIZATION,
+    VulnClass.LOGIC,
+    VulnClass.INFO_LEAK,
+    VulnClass.OTHER,
+])
+def test_configured_policy_keeps_non_memory_c_cpp_findings(vuln_class):
+    finding = _finding("src/parser.cpp", vuln_class)
+
+    kept, dropped = _run(finding, allowed_classes=[vuln_class.value])
+
+    assert kept == [finding]
+    assert dropped == []
+
+
+def test_invalid_configured_class_fails_loudly():
+    finding = _finding("src/parser.cpp", VulnClass.LOGIC)
+
+    with pytest.raises(ValueError, match="invalid step5_prefilter.allowed_classes"):
+        _run(finding, allowed_classes=["not-a-real-class"])

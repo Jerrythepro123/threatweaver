@@ -13,7 +13,7 @@
 # limitations under the License.
 
 """
-Step 6 — Adversarial verification.
+Step 6 — Static adversarial verification followed by dynamic ASAN verification.
 
 For every finding that survived the s4 vote, spawn a fresh agentic Claude
 session inside the target repo with Read/Grep tools. The verifier's job is to
@@ -109,17 +109,18 @@ VERDICT: TRUE_POSITIVE|FALSE_POSITIVE (confidence: N/10) — brief reason
 CVSS: CVSS:3.1/AV:_/AC:_/PR:_/UI:_/S:_/C:_/I:_/A:_"""
 
 
-def run(findings: list[Finding], ctx: ContextPackage, cfg
-        ) -> tuple[list[Finding], list[DroppedFinding]]:
-    """Verify every finding. Returns (verified, dropped)."""
+def run_static(findings: list[Finding], ctx: ContextPackage, cfg
+               ) -> tuple[list[Finding], list[DroppedFinding]]:
+    """Run only static adversarial verification."""
     if not findings:
         return [], []
 
     parallel = getattr(cfg.step6_verify, "parallel", 4)
     min_conf = getattr(cfg.step6_verify, "min_confidence", 7)
-    print(f"  [s6-verify] verifying {len(findings)} findings "
+    print(f"  [s6-static] verifying {len(findings)} findings "
           f"({parallel} parallel, gate>={min_conf}/10)...", file=sys.stderr)
-    print(f"  [s6-verify] total findings before static analysis: {len(findings)}", file=sys.stderr)
+    print(f"  [s6-static] total findings before static analysis: {len(findings)}",
+          file=sys.stderr)
 
     verified: list[Finding] = []
     dropped: list[DroppedFinding] = []
@@ -136,9 +137,9 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
                 f2 = fut.result()
             except GuardrailBlocked as e:
                 guardrail_hits += 1
-                print(f"    [s6-verify] #{i} GUARDRAIL-BLOCKED "
+                print(f"    [s6-static] #{i} GUARDRAIL-BLOCKED "
                       f"({guardrail_hits}/{guardrail_gate})", file=sys.stderr)
-                _errlog.log("s6-verify", f"guardrail#{i}", e,
+                _errlog.log("s6-static", f"guardrail#{i}", e,
                             file=getattr(f, "file", None),
                             line=getattr(f, "line_start", None))
                 dropped.append(_drop(f, "GUARDRAIL_BLOCKED", str(e)[:200]))
@@ -146,12 +147,12 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
                     cli.abort()
                     ex.shutdown(wait=False, cancel_futures=True)
                     raise RuntimeError(
-                        f"s6-verify: {guardrail_hits} cumulative guardrail "
+                        f"s6-static: {guardrail_hits} cumulative guardrail "
                         "blocks with zero successes — aborting run.") from e
                 continue
             except Exception as e:
-                print(f"    [s6-verify] #{i} verify ERROR: {redact(str(e))}", file=sys.stderr)
-                _errlog.log("s6-verify", f"#{i}", e,
+                print(f"    [s6-static] #{i} verify ERROR: {redact(str(e))}", file=sys.stderr)
+                _errlog.log("s6-static", f"#{i}", e,
                             file=getattr(f, "file", None),
                             line=getattr(f, "line_start", None),
                             vuln_class=str(getattr(f, "vuln_class", "")))
@@ -175,7 +176,7 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
                 dropped.append(_drop(f2, "FALSE_POSITIVE", f2.verdict_reason))
     except KeyboardInterrupt:
         n = cli.abort()
-        print(f"  [s6-verify] interrupted — killed {n} running verifier "
+        print(f"  [s6-static] interrupted — killed {n} running verifier "
               f"process(es), cancelling {sum(1 for f in futs if not f.done())} "
               f"pending", file=sys.stderr)
         ex.shutdown(wait=False, cancel_futures=True)
@@ -183,19 +184,45 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
     finally:
         ex.shutdown(wait=True)
 
-    print(f"  [s6-verify] total findings after static analysis: {len(verified)}", file=sys.stderr)
-    verified, asan_dropped = _asan_pass(verified, ctx, cfg)
-    dropped.extend(asan_dropped)
-    print(f"  [s6-verify] total findings after dynamic analysis: {len(verified)}", file=sys.stderr)
+    print(f"  [s6-static] total findings after static analysis: {len(verified)}",
+          file=sys.stderr)
     tp = len(verified)
     fp = sum(1 for d in dropped if d.reason == "FALSE_POSITIVE")
     unc = sum(1 for d in dropped if d.reason == "UNCONFIRMED")
     gb = sum(1 for d in dropped if d.reason == "GUARDRAIL_BLOCKED")
     errs = len(dropped) - fp - unc - gb
-    print(f"  [s6-verify] done: {tp} TRUE_POSITIVE, {fp} FALSE_POSITIVE, "
+    print(f"  [s6-static] done: {tp} TRUE_POSITIVE, {fp} FALSE_POSITIVE, "
           f"{unc} UNCONFIRMED, {gb} GUARDRAIL_BLOCKED, {errs} errors",
           file=sys.stderr)
     return verified, dropped
+
+
+def run_asan(verified: list[Finding], ctx: ContextPackage, cfg
+             ) -> tuple[list[Finding], list[DroppedFinding]]:
+    """Run only dynamic ASAN verification over static true positives."""
+    if not verified:
+        return [], []
+    if not asan_verify.enabled(cfg):
+        print("  [s6-asan] disabled; retaining static verification results",
+              file=sys.stderr)
+        return verified, []
+
+    out, dropped = _asan_pass(verified, ctx, cfg)
+    print(f"  [s6-asan] total findings after dynamic analysis: {len(out)}",
+          file=sys.stderr)
+    unconfirmed = sum(1 for item in dropped if item.reason == "UNCONFIRMED")
+    errors = len(dropped) - unconfirmed
+    print(f"  [s6-asan] done: {len(out)} retained, {unconfirmed} UNCONFIRMED, "
+          f"{errors} errors", file=sys.stderr)
+    return out, dropped
+
+
+def run(findings: list[Finding], ctx: ContextPackage, cfg
+        ) -> tuple[list[Finding], list[DroppedFinding]]:
+    """Compatibility wrapper that runs both Stage 6 verification phases."""
+    verified, static_dropped = run_static(findings, ctx, cfg)
+    verified, asan_dropped = run_asan(verified, ctx, cfg)
+    return verified, static_dropped + asan_dropped
 
 
 def _asan_limit(raw, total: int) -> int:
@@ -222,7 +249,8 @@ def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[
     candidates = [f for f in verified if asan_verify.should_try(f, cfg)]
     max_findings = _asan_limit(getattr(block, "max_findings", "all"), len(candidates))
     skipped = len(verified) - len(candidates)
-    print(f"  [s6-verify] ASAN selected {len(candidates)}/{len(verified)} static TP finding(s), skipped {skipped}, max={max_findings}", file=sys.stderr)
+    print(f"  [s6-asan] selected {len(candidates)}/{len(verified)} static TP "
+          f"finding(s), skipped {skipped}, max={max_findings}", file=sys.stderr)
     out: list[Finding] = []
     dropped: list[DroppedFinding] = []
     attempted = 0
@@ -246,11 +274,12 @@ def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[
         attempted += 1
         bug_idx = attempted
         if shared_build is None:
-            print("    [s6-verify] ASAN repo build planning/building once for selected findings", file=sys.stderr)
+            print("    [s6-asan] repo build planning/building once for selected findings",
+                  file=sys.stderr)
             shared_build = asan_verify.build_repo(
                 ctx, cfg, findings=candidates[:max_findings])
             build_status = "ok" if shared_build.succeeded else "failed"
-            print(f"    [s6-verify] ASAN repo build {build_status}", file=sys.stderr)
+            print(f"    [s6-asan] repo build {build_status}", file=sys.stderr)
         if not shared_build.succeeded:
             artifacts = [str(shared_build.artifact_dir)] if shared_build.artifact_dir is not None else []
             f2 = f.model_copy(update={
@@ -263,9 +292,11 @@ def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[
                 dropped.append(_drop(f2, "UNCONFIRMED", _asan_drop_detail("ASAN repo build failed; dynamic repro was skipped", shared_build.summary)))
             else:
                 out.append(f2)
-            print(f"    [s6-verify] ASAN bug{bug_idx} no_crash (repo build failed)", file=sys.stderr)
+            print(f"    [s6-asan] bug{bug_idx} no_crash (repo build failed)",
+                  file=sys.stderr)
             continue
-        print(f"    [s6-verify] ASAN bug{bug_idx} reproducing {f.file}:{f.line_start}", file=sys.stderr)
+        print(f"    [s6-asan] bug{bug_idx} reproducing {f.file}:{f.line_start}",
+              file=sys.stderr)
         asan = asan_verify.run(f, ctx, cfg, idx=bug_idx, build=shared_build)
         status = "crash_confirmed" if asan.crashed else "no_crash"
         artifacts = [str(asan.artifact_dir)] if asan.artifact_dir is not None else []
@@ -279,10 +310,10 @@ def _asan_pass(verified: list[Finding], ctx: ContextPackage, cfg) -> tuple[list[
             dropped.append(_drop(f2, "UNCONFIRMED", _asan_drop_detail("ASAN did not confirm a crash/repro within the per-bug budget", asan.summary)))
         else:
             out.append(f2)
-        print(f"    [s6-verify] ASAN bug{bug_idx} {status}", file=sys.stderr)
+        print(f"    [s6-asan] bug{bug_idx} {status}", file=sys.stderr)
     if attempted or gated_but_unattempted:
         print(
-            f"  [s6-verify] ASAN gate attempted {attempted}/{len(candidates)} selected finding(s), "
+            f"  [s6-asan] gate attempted {attempted}/{len(candidates)} selected finding(s), "
             f"budget-excluded {gated_but_unattempted}",
             file=sys.stderr,
         )
@@ -310,19 +341,19 @@ def _verify_one(idx: int, f: Finding, ctx: ContextPackage, cfg) -> Finding:
         cwd=ctx.repo_root,
         max_budget_usd=getattr(cfg.step6_verify, "max_budget_usd", 1.0),
         max_turns=getattr(cfg.step6_verify, "max_turns", None),
-        tag=f"s6 verify#{idx}",
+        tag=f"s6 static verify#{idx}",
     )
 
     verdict, conf, reason, cvss, reasoning = _parse_verdict(raw)
     if reason == "verifier output unparseable":
-        _errlog.log("s6-verify", f"unparseable#{idx}",
+        _errlog.log("s6-static", f"unparseable#{idx}",
                     "no VERDICT line in verifier output",
                     file=f.file, line=f.line_start,
                     raw_len=len(raw or ""), raw=(raw or "")[:600])
-        print(f"    [s6-verify] #{idx} UNPARSEABLE raw[:200]="
+        print(f"    [s6-static] #{idx} UNPARSEABLE raw[:200]="
               f"{(raw or '')[:200]!r}", file=sys.stderr)
     s = cvss_score(cvss)
-    print(f"    [s6-verify] #{idx} {f.file}:{f.line_start} → {verdict} "
+    print(f"    [s6-static] #{idx} {f.file}:{f.line_start} → {verdict} "
           f"({conf}/10) cvss={s if s is not None else '-'}", file=sys.stderr)
 
     return f.model_copy(update={

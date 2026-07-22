@@ -84,8 +84,7 @@ config profiles.
 | `vvaharness doctor [--config <file>]` | Report credential/backend readiness and run a live connectivity probe against the models the config will actually use. |
 | `vvaharness estimate --repo <path>` | Print a rough scope/cost preview (file count, bytes, ~input tokens). Spends nothing. |
 | `vvaharness gc [--keep-runs N] [--max-age-days N] [--run <path>] [--dry-run]` | Prune old checkpoint runs from the SQLite state DB (defaults: keep 100 runs / 5 days). `--run <path>` instead fully evicts the single run for that repo path (its `run_id` is path-derived). |
-| `vvaharness experience <path\|list\|show\|remove\|restore\|validate>` | Inspect and curate the persistent, human-editable archive of ASAN-confirmed bugs. Experience is committed only after s9 completes. |
-| `vvaharness test [--root <checkout>] [pytest flags]` | Run every test module under `tests/`, covering s1–s9, ASAN, adaptive verification planning, experience, CLI, orchestration, reports, remediation, and validation. Returns pytest's exit code. |
+| `vvaharness test [--root <checkout>] [pytest flags]` | Run every test module under `tests/`, covering s1–s9, ASAN, adaptive verification planning, CLI, orchestration, reports, remediation, and validation. Returns pytest's exit code. |
 
 A `.env` found from the current directory upward (the first match in the cwd or
 any ancestor) is loaded automatically (variables you export yourself take

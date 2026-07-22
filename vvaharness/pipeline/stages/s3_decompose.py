@@ -25,7 +25,12 @@ from pathlib import Path, PurePosixPath
 from vvaharness.models import ContextPackage, TaskManifest, Chunk, ChunkSize
 from vvaharness.backends.llm import prompt
 from vvaharness.util.json_extract import extract_json
-from vvaharness.lang.hints import detect_languages, EXT_TO_LANG, is_iac_file
+from vvaharness.lang.hints import (
+    detect_languages,
+    EXT_TO_LANG,
+    is_c_cpp_file,
+    is_iac_file,
+)
 from vvaharness.pipeline.stages.s1_preprocess import q_join, q_file, q_name
 
 SYSTEM = """You are a vulnerability research strategist. You receive a structured
@@ -68,6 +73,7 @@ Respond with ONLY a JSON object, no prose:
 
 
 def run(ctx: ContextPackage, cfg) -> TaskManifest:
+    ctx = _native_only_context(ctx)
     user_prompt = ctx.to_prompt_block()
 
     raw = prompt(
@@ -133,6 +139,76 @@ def run(ctx: ContextPackage, cfg) -> TaskManifest:
           f"top risk = {manifest.sorted_chunks()[0].id if manifest.chunks else 'none'}",
           file=sys.stderr)
     return manifest
+
+
+def _native_only_context(ctx: ContextPackage) -> ContextPackage:
+    """Return an s3-scoped copy containing only C/C++ code surfaces.
+
+    Stage 5 currently accepts only low-level memory findings in C/C++ files.
+    Applying the same language gate before decomposition prevents non-native
+    files from consuming strategist output slots, deterministic chunks, and s4
+    model calls.  The input object is intentionally not mutated: reporting can
+    still describe the repository's full inventory and explain that only its
+    native-code portion was scanned.
+    """
+    native_files = [file for file in ctx.all_files if is_c_cpp_file(file)]
+    native_set = set(native_files)
+
+    def _site_file(site: str) -> str:
+        qualified = q_file(site)
+        if qualified:
+            return qualified
+        path, sep, line = site.rpartition(":")
+        return path if sep and line.isdigit() else site
+
+    call_graph_files = {
+        name: [site for site in sites if _site_file(site) in native_set]
+        for name, sites in ctx.call_graph_files.items()
+    }
+    call_graph_files = {
+        name: sites for name, sites in call_graph_files.items() if sites
+    }
+
+    def _native_node(node: str) -> bool:
+        file = q_file(node)
+        if file:
+            return file in native_set
+        # Bare legacy function names have no path to classify. Keep them when
+        # no deterministic definition-site information exists; any files they
+        # later suggest are still normalized against native_files.
+        return node not in ctx.call_graph_files or node in call_graph_files
+
+    call_graph = {
+        caller: [callee for callee in callees if _native_node(callee)]
+        for caller, callees in ctx.call_graph.items()
+        if _native_node(caller)
+    }
+
+    modules = []
+    for module in ctx.modules:
+        files = [file for file in module.files if file in native_set]
+        if files:
+            modules.append(module.model_copy(update={"files": files}))
+
+    scoped = ctx.model_copy(deep=True, update={
+        "language": "c-cpp",
+        "all_files": native_files,
+        "modules": modules,
+        "entry_points": [
+            entry for entry in ctx.entry_points if entry.file in native_set
+        ],
+        "unsafe_sinks": [
+            sink for sink in ctx.unsafe_sinks if sink.file in native_set
+        ],
+        "call_graph": call_graph,
+        "call_graph_files": call_graph_files,
+    })
+    print(
+        f"    [s3] native scope: {len(native_files)}/{len(ctx.all_files)} "
+        "files retained before chunk generation",
+        file=sys.stderr,
+    )
+    return scoped
 
 
 # ─────────────────────────────────────────────────────────────────────────────

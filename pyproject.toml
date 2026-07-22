@@ -29,7 +29,9 @@ dependencies = [
     "PyYAML>=6.0.3",
     "anthropic>=0.107.0",
     "openai>=2.41.0",
-    "httpx>=0.28.1",
+    # OpenAI/Anthropic endpoints may inherit HTTP(S)_PROXY=socks*. The live
+    # model check and scans must be able to construct that transport.
+    "httpx[socks]>=0.28.1",
     "urllib3>=2.7.0",
     "python-dotenv>=1.2.2",
     "typing_extensions>=4.0",

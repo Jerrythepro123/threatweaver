@@ -21,7 +21,8 @@ adversarial verifier isn't burned on findings that can be rejected
 mechanically:
 
   - findings outside C/C++ source and header files
-  - findings outside the low-level memory-safety classes eligible for ASAN
+  - findings outside step5_prefilter.allowed_classes (defaults to the original
+    low-level memory-safety classes for backward compatibility)
   - test/mock/example/fixture paths (model ignores the prompt rule ~10%)
   - hallucinated file paths not present in the repo inventory
   - s4 confidence below step5_prefilter.min_pre_confidence (legacy: step6_verify.min_pre_confidence)
@@ -38,9 +39,8 @@ checkpoint on --resume.
 from __future__ import annotations
 import re
 import sys
-from pathlib import PurePosixPath
 
-from vvaharness.lang.hints import EXT_TO_LANG
+from vvaharness.lang.hints import is_c_cpp_file
 from vvaharness.models import ContextPackage, Finding, DroppedFinding, VulnClass
 from . import s7_dedup
 
@@ -70,8 +70,8 @@ _SECRET_TEXT_RX = re.compile(
     r"|\bxox[baprs]-[0-9A-Za-z-]{10,}\b"
 )
 
-# Stage 5 is intentionally scoped to C/C++ memory-safety findings for now.
-# Keep this aligned with the default classes eligible for ASAN verification.
+# Backward-compatible default for profiles that do not declare allowed_classes.
+# ASAN eligibility remains independently restricted to compatible bug classes.
 _LOW_LEVEL_MEMORY_CLASSES = frozenset({
     VulnClass.UAF,
     VulnClass.HEAP_OVERFLOW,
@@ -82,11 +82,31 @@ _LOW_LEVEL_MEMORY_CLASSES = frozenset({
 })
 
 
+def _allowed_classes(cfg) -> frozenset[VulnClass]:
+    """Resolve the configured stage-5 vulnerability-class allowlist."""
+    raw = _gate(cfg, "allowed_classes", None)
+    if not raw:
+        return _LOW_LEVEL_MEMORY_CLASSES
+    resolved: set[VulnClass] = set()
+    invalid: list[str] = []
+    for value in raw:
+        try:
+            resolved.add(value if isinstance(value, VulnClass)
+                         else VulnClass(str(value)))
+        except ValueError:
+            invalid.append(str(value))
+    if invalid:
+        valid = ", ".join(v.value for v in VulnClass)
+        raise ValueError(
+            "invalid step5_prefilter.allowed_classes value(s): "
+            f"{', '.join(invalid)}; valid values: {valid}"
+        )
+    return frozenset(resolved)
+
+
 def _is_c_cpp_file(file: str) -> bool:
     """Return whether *file* has a C/C++ source or header extension."""
-    normalized = file.replace("\\", "/")
-    suffix = PurePosixPath(normalized).suffix.lower()
-    return EXT_TO_LANG.get(suffix) == "c-cpp"
+    return is_c_cpp_file(file)
 
 
 def _is_secret_class(f: Finding) -> bool:
@@ -119,6 +139,7 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
         ) -> tuple[list[Finding], list[DroppedFinding]]:
     min_conf = _gate(cfg, "min_pre_confidence", 0.0) or 0.0
     require_evidence = _gate(cfg, "require_evidence", False)
+    allowed_classes = _allowed_classes(cfg)
 
     valid_files = set(ctx.all_files) if ctx.all_files else None
     keep: list[Finding] = []
@@ -135,8 +156,8 @@ def run(findings: list[Finding], ctx: ContextPackage, cfg
         secret_class = in_test_path and _is_secret_class(f)
         if not _is_c_cpp_file(f.file):
             _drop(f, "EXCLUDED", "not a C/C++ source or header file")
-        elif f.vuln_class not in _LOW_LEVEL_MEMORY_CLASSES:
-            _drop(f, "EXCLUDED", "not a low-level memory-safety finding")
+        elif f.vuln_class not in allowed_classes:
+            _drop(f, "EXCLUDED", "vulnerability class not enabled by stage-5 policy")
         elif in_test_path and not secret_class:
             _drop(f, "EXCLUDED", "test/mock/example path")
         elif valid_files is not None and f.file not in valid_files:

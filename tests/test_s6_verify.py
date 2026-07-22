@@ -226,6 +226,38 @@ def test_run_empty_returns_empty():
     assert dropped == []
 
 
+def test_static_phase_does_not_invoke_asan(monkeypatch):
+    monkeypatch.setattr(
+        s6_verify, "agentic",
+        lambda *args, **kwargs: (
+            "VERDICT: TRUE_POSITIVE (confidence: 9/10) — reachable\n"
+            f"CVSS: {_GOOD_CVSS}\n"
+        ),
+    )
+    monkeypatch.setattr(
+        s6_verify, "_asan_pass",
+        lambda *args, **kwargs: pytest.fail("static phase invoked ASAN"),
+    )
+
+    verified, dropped = s6_verify.run_static([_finding()], _ctx(), _cfg())
+
+    assert len(verified) == 1
+    assert dropped == []
+
+
+def test_asan_phase_does_not_invoke_static_verifier(monkeypatch):
+    finding = _finding(verdict="TRUE_POSITIVE", verdict_confidence=9)
+    monkeypatch.setattr(
+        s6_verify, "agentic",
+        lambda *args, **kwargs: pytest.fail("ASAN phase invoked static verifier"),
+    )
+
+    verified, dropped = s6_verify.run_asan([finding], _ctx(), _cfg())
+
+    assert verified == [finding]
+    assert dropped == []
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # run() — happy path: TP above gate is verified; CVSS scored
 # ─────────────────────────────────────────────────────────────────────────────

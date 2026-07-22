@@ -18,3 +18,14 @@ def test_scan_repo_does_not_invoke_remediation_or_validation():
     assert "_run_remediation(" not in source
     assert "_run_validation(" not in source
     assert "total=11" not in source
+
+
+def test_scan_repo_checkpoints_static_and_asan_verification_separately():
+    source = inspect.getsource(scan_repo)
+
+    assert 'load_ckpt(ckpt_dir, run_id, "s6-static")' in source
+    assert 'save_ckpt(ckpt_dir, run_id, "s6-static"' in source
+    assert 'load_ckpt(ckpt_dir, run_id, "s6-asan")' in source
+    assert 'save_ckpt(ckpt_dir, run_id, "s6-asan"' in source
+    assert "s6_verify.run_static(" in source
+    assert "s6_verify.run_asan(" in source

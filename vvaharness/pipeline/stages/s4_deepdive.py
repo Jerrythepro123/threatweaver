@@ -49,7 +49,7 @@ from vvaharness.backends.claude_cli import GuardrailBlocked
 from vvaharness.backends.sdk import _supports_temperature
 from vvaharness.util.prompts import (EXCLUSION_RULES, SELF_VERIFICATION,
                             SEVERITY_GUIDANCE, EXHAUSTIVENESS)
-from vvaharness.lang.hints import hints_for, LANG_DISPLAY
+from vvaharness.lang.hints import hints_for, is_c_cpp_file, LANG_DISPLAY
 from vvaharness.pipeline.stages.s1_preprocess import q_file, q_name
 
 _QUALITY_BAR = """\
@@ -203,6 +203,35 @@ def _effective_runs(cfg) -> tuple[int, int]:
     return runs, threshold
 
 
+def _native_only_chunks(chunks: list[Chunk]) -> list[Chunk]:
+    """Strip non-C/C++ files before any s4 prompt is constructed.
+
+    Fresh scans already receive native-only manifests from s3. This boundary
+    check also protects resumed scans whose saved s3 checkpoint predates that
+    rule, and deliberately leaves the checkpoint objects unmodified.
+    """
+    scoped: list[Chunk] = []
+    removed_files = 0
+    removed_chunks = 0
+    for chunk in chunks:
+        files = [file for file in chunk.files if is_c_cpp_file(file)]
+        removed_files += len(chunk.files) - len(files)
+        if not files:
+            removed_chunks += 1
+            continue
+        scoped.append(chunk.model_copy(update={
+            "files": files,
+            "languages": ["c-cpp"],
+        }))
+    if removed_files or removed_chunks:
+        print(
+            f"  [s4] native scope guard: removed {removed_files} non-C/C++ "
+            f"file reference(s) and {removed_chunks} empty chunk(s)",
+            file=sys.stderr,
+        )
+    return scoped
+
+
 def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg
         ) -> tuple[list[Finding], dict[str, str]]:
     """Process every chunk.
@@ -212,7 +241,7 @@ def run(manifest_chunks: list[Chunk], ctx: ContextPackage, cfg
     coverage loss (a failed/timed-out chunk yields no findings, previously
     indistinguishable from a clean chunk that simply found nothing)."""
     repo_root = Path(ctx.repo_root)
-    chunks = sorted(manifest_chunks, key=lambda c: c.risk_rank)
+    chunks = sorted(_native_only_chunks(manifest_chunks), key=lambda c: c.risk_rank)
     parallel = getattr(cfg.step4, "parallel", 1)
     runs_n, threshold = _effective_runs(cfg)
 

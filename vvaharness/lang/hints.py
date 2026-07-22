@@ -111,6 +111,18 @@ EXT_TO_LANG: dict[str, str] = {
     ".slim": "web-template", ".haml": "web-template",
 }
 
+
+def is_c_cpp_file(path: str) -> bool:
+    """Return whether *path* is classified as C/C++ source or a header.
+
+    Keep early chunk scoping and the stage-5 finding gate on one shared
+    definition so a file can never be admitted by one phase and rejected by
+    the other solely because their extension lists drifted apart.
+    """
+    normalized = path.replace("\\", "/")
+    return EXT_TO_LANG.get(PurePosixPath(normalized).suffix.lower()) == "c-cpp"
+
+
 LANG_DISPLAY: dict[str, str] = {
     "c-cpp": "C/C++", "rust": "Rust", "go": "Go", "python": "Python",
     "java": "Java", "javascript": "JavaScript", "php": "PHP",
