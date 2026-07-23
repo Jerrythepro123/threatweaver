@@ -90,49 +90,51 @@ step1:
 
 step2:
   enabled: true
-  max_tokens: 6000
-  max_threats: 4
+  max_tokens: 10000
+  max_threats: 10
   baseline: auto
   max_doc_chars: 5000
   max_manifest_chars: 1200
-  max_modules: 8
-  max_entry_points: 16
+  max_modules: 20
+  max_entry_points: 50
   max_config_reps: 8
   max_api_artefacts: 6
 
 step3:
   max_tokens: 7000
   timeout: 720
-  taint_chunks: false
-  taint_max_hops: 2
-  taint_max_chunks: 2
-  taint_files_per_hop: 2
+  taint_chunks: true
+  taint_max_hops: 6
+  taint_max_chunks: 20
+  taint_files_per_hop: 4
   pack_by: loc
   chunk_token_budget: 28000
   chunk_overhead_tokens: 10000
-  risk_chunk_loc: 10000
-  catchall_enabled: false
-  catchall_chunk_loc: 1800
-  catchall_max_files: 12
+  risk_chunk_loc: 5000
+  catchall_enabled: true
+  catchall_chunk_loc: 3000
+  catchall_max_files: 60
   max_files_per_chunk: 90
   specialists:
     - native-memory
-  specialist_chunk_loc: 2200
+    - crypto
+    - logic-bug
+  specialist_chunk_loc: 5000
 
 step4:
   parallel: 2
-  timeout: 540
-  runs: 1
+  timeout: 900
+  runs: 2
   vote_threshold: 1
-  specialist_runs: 1
-  line_bucket: 10
-  max_findings_per_run: 2
-  max_tokens: 7000
-  neighbor_context_lines: 4
-  neighbor_context_max: 6
+  specialist_runs: 2
+  line_bucket: 3
+  max_findings_per_run: 4
+  max_tokens: 12000
+  neighbor_context_lines: 12
+  neighbor_context_max: 20
 
 step5_prefilter:
-  min_pre_confidence: 0.85
+  min_pre_confidence: 0.9
   require_evidence: true
   allowed_classes:
     - use-after-free
