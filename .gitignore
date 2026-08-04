@@ -96,3 +96,5 @@ node_modules/
 
 # user-local config override (copied from a profile) — never commit
 config.yaml
+.venv-test
+.pytest-deps

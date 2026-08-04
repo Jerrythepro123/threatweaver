@@ -91,8 +91,6 @@ def test_saturated_verifier_cannot_block_audit(monkeypatch):
         assert on_findings is not None
         for finding in findings:
             on_findings([finding])
-        # With the old synchronous semaphore callback, the third emission
-        # blocked here because parallel=1 permits only two in-flight futures.
         audit_returned.set()
         return findings, {"chunk-1": "completed"}
 
@@ -112,6 +110,8 @@ def test_saturated_verifier_cannot_block_audit(monkeypatch):
     assert audit_returned.is_set()
     assert set(verified_titles) == {finding.title for finding in findings}
     assert len(result.static_verified) == 3
+    assert result.submitted == 3
+    assert result.speculative == 0
 
 
 def test_s4_emits_only_final_voted_representative(monkeypatch, tmp_path):
@@ -192,7 +192,7 @@ def test_asan_starts_before_s4_returns(monkeypatch, capsys):
     assert s4_returned.is_set()
     assert len(result.verified) == 1
     assert result.verified[0].asan_status == "crash_confirmed"
-    assert "[stage456-progress] DONE findings=1 static_confirmed=1 " \
+    assert "[stage456-progress] DONE scope=authoritative findings=1 static_confirmed=1 " \
            "dynamic_confirmed=1" in capsys.readouterr().err
 
 
@@ -238,7 +238,7 @@ def test_streaming_never_retains_no_crash_even_if_config_disables_gate(
     assert result.asan_dropped[0].finding.verdict is None
 
 
-def test_full_s5_selection_is_authoritative(monkeypatch):
+def test_full_s5_selection_is_authoritative(monkeypatch, capsys):
     keep = _finding("keep")
     speculative = _finding("later duplicate")
     verified_titles: list[str] = []
@@ -267,6 +267,14 @@ def test_full_s5_selection_is_authoritative(monkeypatch):
     assert [item.title for item in result.static_verified] == ["keep"]
     assert result.submitted == 2
     assert result.speculative == 1
+    stderr = capsys.readouterr().err
+    assert "[s6-progress] DONE scope=authoritative static_completed=1 " \
+           "static_tp=1 static_dropped=0" in stderr
+    assert "[stage456-progress] DONE scope=authoritative findings=2 " \
+           "static_confirmed=1 dynamic_confirmed=0" in stderr
+    assert "static_tp=2" not in stderr
+    assert "AUTHORITATIVE STATIC title='keep'" in stderr
+    assert "later duplicate" not in stderr
 
 
 def test_experimental_flag_is_advertised(capsys):
@@ -296,17 +304,16 @@ def test_streaming_reports_stage5_and_stage6_progress(monkeypatch, capsys):
     streaming_verification.run([object()], _ctx(), _cfg())
 
     stderr = capsys.readouterr().err
-    assert "[s5-progress] STREAM received=1 eligible=1 filtered=0" in stderr
+    assert "[s5-progress] STREAM" not in stderr
     assert "[s6-progress] STATIC event=submitted" in stderr
     assert "[s6-progress] STATIC event=started" in stderr
-    assert "[s6-progress] STATIC event=completed:true_positive" in stderr
-    assert "queued=0 running=0 completed=1 tp=1 dropped=0" in stderr
-    assert "[s6-progress] DONE static_completed=1 static_tp=1" in stderr
-    assert "[stage456-progress] event=findings findings=1 " \
-           "static_confirmed=0 dynamic_confirmed=0" in stderr
-    assert "[stage456-progress] event=static findings=1 " \
-           "static_confirmed=1 dynamic_confirmed=0" in stderr
-    assert "[stage456-progress] DONE findings=1 static_confirmed=1 " \
+    assert "[s6-progress] STATIC event=completed" in stderr
+    assert "queued=0 running=0 completed=1" in stderr
+    assert "[s6-progress] STATIC event=completed tp=" not in stderr
+    assert "[s6-progress] DONE scope=authoritative static_completed=1 " \
+           "static_tp=1 static_dropped=0" in stderr
+    assert "[stage456-progress] event=" not in stderr
+    assert "[stage456-progress] DONE scope=authoritative findings=1 static_confirmed=1 " \
            "dynamic_confirmed=0" in stderr
 
 

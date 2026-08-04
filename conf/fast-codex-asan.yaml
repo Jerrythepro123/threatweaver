@@ -3,9 +3,10 @@
 # Intended command:
 #   vvaharness scan --repo /mnt/d/<target> --stop-after s9 --config ./fast-codex-asan.yaml
 #
-# Tuned for a ~1 hour s1-s9 run on medium native-code repositories: narrow
-# chunking, low parallelism, no s10/s11, gpt-5.6-sol first for audit, and Codex
-# only for bounded ASAN repro bundles.
+# Tuned for a fast s1-s9 run on medium native-code repositories: narrow
+# chunking, moderate concurrency, no s10/s11, gpt-5.6-sol for audit, and Codex
+# only for bounded ASAN repro bundles.  The two-pass deep dive and mandatory
+# ASAN crash proof are retained to protect finding quality.
 
 models:
   autoexclude:  {id: "${VVAHARNESS_OPENAI_MODEL:-gpt-5.6-sol}", via: openai}
@@ -117,19 +118,20 @@ step3:
   max_files_per_chunk: 90
   specialists:
     - native-memory
-    - crypto
     - logic-bug
   specialist_chunk_loc: 5000
 
 step4:
-  parallel: 2
-  timeout: 900
+  # With streaming verification, s4 and s6 pools overlap. Keep their combined
+  # OpenAI concurrency at four to avoid provider concurrency-limit errors.
+  parallel: 3
+  timeout: 600
   runs: 2
   vote_threshold: 1
-  specialist_runs: 2
+  specialist_runs: 1
   line_bucket: 3
   max_findings_per_run: 4
-  max_tokens: 12000
+  max_tokens: 9000
   neighbor_context_lines: 12
   neighbor_context_max: 20
 
@@ -147,7 +149,7 @@ step5_prefilter:
     - other
 
 step6_verify:
-  parallel: 2
+  parallel: 1
   min_confidence: 7
   max_budget_usd: 0.35
   max_turns: 4
@@ -161,14 +163,14 @@ step6_verify:
     # keep their static adversarial-verifier verdict.
     require_crash: true
     all_classes: false
-    max_findings: all
+    max_findings: 4
     max_turns: 8
     max_budget_usd: 15.0
-    repo_build_timeout: 2400
+    repo_build_timeout: 1800
     # Estimate verification time, turns, and spend independently for each bug
     # from call-chain and runtime complexity. per_bug_timeout is only the
     # estimator fallback.
-    adaptive_timeout: true
+    adaptive_timeout: false
     per_bug_timeout: 300
     min_per_bug_timeout: 300
     max_per_bug_timeout: 300
@@ -180,15 +182,15 @@ step6_verify:
     min_repro_budget_usd: 1.0
     max_repro_budget_usd: 15.0
     execution_reserve: 120
-    plan_timeout: 600
-    build_plan_timeout: 600
-    repro_plan_timeout: 600
+    plan_timeout: 300
+    build_plan_timeout: 300
+    repro_plan_timeout: 300
     max_samples: 6
     max_sample_bytes: 4096
     max_scripts: 3
     max_script_bytes: 12000
     max_run_commands: 6
-    build_timeout: 600
+    build_timeout: 300
     run_timeout: 60
     classes:
       - use-after-free
@@ -258,8 +260,10 @@ step7_dedup:
   max_tokens: 7000
 
 step8:
-  max_tokens: 7000
-  timeout: 540
+  # Chaining cannot create or confirm findings, so bound this reporting-only
+  # pass more tightly without weakening s4/s5/s6 bug confirmation.
+  max_tokens: 4000
+  timeout: 360
 
 step_remediate:
   enabled: false
